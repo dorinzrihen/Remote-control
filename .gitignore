@@ -10,3 +10,6 @@ local.properties
 .DS_Store
 # signing key: keep private (release builds fall back to the debug key without it)
 keystore/
+
+# release artifact lives in GitHub Releases, not in git
+UniRemote.apk

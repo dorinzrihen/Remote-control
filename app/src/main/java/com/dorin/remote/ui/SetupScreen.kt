@@ -198,6 +198,7 @@ fun SetupScreen(vm: RemoteViewModel) {
         // ---------------- Diagnostics ----------------
         val log by com.dorin.remote.Diag.lines.collectAsState()
         val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+        Text("UniRemote ${vm.currentVersion} · updates come from github.com/dorinzrihen/Remote-control", color = TextDim, fontSize = 11.sp, modifier = Modifier.padding(top = 12.dp))
         Section("Diagnostics log", TextDim) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(log.joinToString("\n"))) }) { Text("Copy log") }

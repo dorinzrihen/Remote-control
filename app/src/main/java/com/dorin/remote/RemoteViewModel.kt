@@ -71,6 +71,13 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val lgApps = MutableStateFlow(loadAppsCache())
     /** Text recognised from the phone microphone, consumed by the keyboard bar. */
     val voiceText = MutableStateFlow<String?>(null)
+    // self-update via GitHub Releases
+    val update = MutableStateFlow<com.dorin.remote.net.UpdateInfo?>(null)
+    val updateProgress = MutableStateFlow<Float?>(null)
+    val updateDismissed = MutableStateFlow(false)
+    val currentVersion: String = runCatching {
+        app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: "0"
+    }.getOrDefault("0")
     // YouTube search (done on the phone, playback on the TV)
     val showYouTube = MutableStateFlow(false)
     val ytQuery = MutableStateFlow("")
@@ -80,6 +87,11 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         connectAll()
+        viewModelScope.launch {
+            runCatching { com.dorin.remote.net.Updater.check(currentVersion) }
+                .onSuccess { update.value = it }
+                .onFailure { Log.w(tag, "update check failed: ${it.message}") }
+        }
         viewModelScope.launch {
             lg.apps.collect { list ->
                 if (list.isNotEmpty()) {
@@ -293,6 +305,26 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setLgShortcuts(ids: List<String>) { prefs.lgShortcuts = ids; lgShortcutIds.value = ids }
     fun setWebShortcuts(list: List<Pair<String, String>>) { prefs.webShortcuts = list; webShortcuts.value = list }
+
+    fun installUpdate() {
+        val info = update.value ?: return
+        val ctx = getApplication<Application>()
+        if (!com.dorin.remote.net.Updater.ensureInstallPermission(ctx)) {
+            say("Allow UniRemote to install updates, then press Update again")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                updateProgress.value = 0f
+                val apk = com.dorin.remote.net.Updater.download(ctx, info) { updateProgress.value = it }
+                updateProgress.value = null
+                com.dorin.remote.net.Updater.install(ctx, apk)
+            } catch (e: Exception) {
+                updateProgress.value = null
+                say("Update failed: ${e.message}")
+            }
+        }
+    }
 
     fun onVoiceResult(text: String) {
         voiceText.value = text

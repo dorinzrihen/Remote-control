@@ -3,7 +3,9 @@
 One Android remote for an LG webOS TV, a Xiaomi Android TV streamer, and (through the TV over HDMI ARC) the LG soundbar.
 
 ## Install
-Copy `UniRemote.apk` to the phone and open it (allow "install from unknown sources").
+Download `UniRemote.apk` from the [latest release](https://github.com/dorinzrihen/Remote-control/releases/latest) on the phone and open it (allow "install from unknown sources").
+
+After that the app checks GitHub Releases on every launch and offers to download and install new versions itself.
 
 ## First run
 1. Put the phone on the same Wi-Fi as the TV and the Xiaomi.
@@ -27,5 +29,7 @@ Copy `UniRemote.apk` to the phone and open it (allow "install from unknown sourc
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ./gradlew assembleRelease
 cp app/build/outputs/apk/release/app-release.apk UniRemote.apk
+gh release create v1.2 UniRemote.apk --title "UniRemote 1.2" --notes "what changed"
 ```
+Bump `versionCode` / `versionName` in `app/build.gradle.kts` before each release; the in-app updater compares `versionName` with the release tag.
 Protocol unit tests (compared against the official Python protobuf library): `./gradlew testReleaseUnitTest`

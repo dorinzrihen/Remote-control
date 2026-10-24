@@ -105,6 +105,32 @@ fun RemoteScreen(vm: RemoteViewModel) {
             IconButton(onClick = { vm.showSetup.value = true }) { Icon(Icons.Default.Settings, "Settings", tint = TextDim) }
         }
 
+        // Update banner
+        val update by vm.update.collectAsState()
+        val updateProgress by vm.updateProgress.collectAsState()
+        val updateDismissed by vm.updateDismissed.collectAsState()
+        if (update != null && !updateDismissed) {
+            Row(
+                Modifier.fillMaxWidth().background(Color(0xFF2A3A2E), RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Version ${update!!.version} is available", color = AccentAtv, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    val p = updateProgress
+                    Text(
+                        if (p != null) "Downloading… ${(p * 100).toInt()}%" else update!!.notes.lines().firstOrNull { it.isNotBlank() } ?: "Tap Update to install",
+                        color = TextDim, fontSize = 11.sp, maxLines = 1,
+                    )
+                }
+                if (updateProgress == null) {
+                    PillButton("Update", color = AccentAtv, contentColor = Bg) { vm.installUpdate() }
+                    Spacer(Modifier.width(6.dp))
+                    PillButton("", icon = Icons.Default.Close) { vm.updateDismissed.value = true }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
         // Target switch
         Row(Modifier.fillMaxWidth().background(Surface1, RoundedCornerShape(14.dp)).padding(4.dp)) {
             TargetTab("LG TV", target == Target.LG, Accent, Modifier.weight(1f)) { vm.target.value = Target.LG }
