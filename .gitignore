@@ -1,0 +1,12 @@
+# build output
+.gradle/
+.kotlin/
+build/
+app/build/
+# machine-specific
+local.properties
+.idea/
+*.iml
+.DS_Store
+# signing key: keep private (release builds fall back to the debug key without it)
+keystore/
