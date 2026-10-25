@@ -49,6 +49,7 @@ fun QuickActionsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     val pictureMode by vm.lg.pictureMode.collectAsState()
     val sleepEnd by vm.sleepEnd.collectAsState()
     val connected = lgState is LgState.Connected
+    val hasLg = vm.prefs.lgIp.isNotEmpty()
     val ctx = LocalContext.current
 
     var pendingMinutes by remember { mutableIntStateOf(0) }
@@ -89,7 +90,11 @@ fun QuickActionsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
                 }
             }
 
-            // ---- Brightness ----
+            // ---- Brightness (LG only: Samsung has no picture API over this channel) ----
+            if (!hasLg) {
+                Text("Brightness, picture mode and screen-off are available on the LG TV only.", color = TextDim, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+            } else {
             Text(
                 "Brightness (backlight)" + (backlight?.let { "  ·  $it" } ?: if (connected) "" else "  ·  connect to the TV first"),
                 color = TextDim, fontSize = 13.sp,
@@ -126,6 +131,7 @@ fun QuickActionsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 PillButton("Screen off, keep sound", modifier = Modifier.weight(1f)) { vm.screenOff() }
                 PillButton("Screen on", modifier = Modifier.weight(1f)) { vm.lg.screenOn() }
+            }
             }
             Spacer(Modifier.height(4.dp))
         }

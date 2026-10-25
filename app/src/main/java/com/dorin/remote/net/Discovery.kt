@@ -21,14 +21,40 @@ private const val TAG = "Discovery"
 object Discovery {
 
     /** Find LG webOS TVs with an SSDP M-SEARCH. */
-    suspend fun findLgTvs(ctx: Context, timeoutMs: Long = 3000): List<FoundDevice> = withContext(Dispatchers.IO) {
+    suspend fun findLgTvs(ctx: Context, timeoutMs: Long = 3000): List<FoundDevice> =
+        ssdp(ctx, "urn:lge-com:service:webos-second-screen:1", timeoutMs) { text, ip ->
+            if (!text.contains("webos", ignoreCase = true) && !text.contains("LGE", ignoreCase = true)) null
+            else FoundDevice(ip, header(text, "SERVER")?.take(40) ?: "LG webOS TV")
+        }
+
+    /** Find Samsung Tizen TVs: SSDP for the remote-control receiver, then the name from the REST API on port 8001. */
+    suspend fun findSamsungTvs(ctx: Context, timeoutMs: Long = 3000): List<FoundDevice> {
+        val raw = ssdp(ctx, "urn:samsung.com:device:RemoteControlReceiver:1", timeoutMs) { text, ip ->
+            if (!text.contains("samsung", ignoreCase = true)) null else FoundDevice(ip, "Samsung TV")
+        }
+        return withContext(Dispatchers.IO) {
+            raw.map { d -> FoundDevice(d.ip, samsungName(d.ip) ?: d.name) }
+        }
+    }
+
+    private fun samsungName(ip: String): String? = runCatching {
+        val conn = java.net.URL("http://$ip:8001/api/v2/").openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 1500; conn.readTimeout = 1500
+        val dev = org.json.JSONObject(conn.inputStream.bufferedReader().readText()).optJSONObject("device")
+        dev?.optString("name")?.ifEmpty { dev.optString("modelName") }?.ifEmpty { null }
+    }.getOrNull()
+
+    private fun header(text: String, name: String): String? =
+        text.lines().firstOrNull { it.startsWith(name, true) }?.substringAfter(":")?.trim()
+
+    private suspend fun ssdp(ctx: Context, st: String, timeoutMs: Long, parse: (text: String, ip: String) -> FoundDevice?): List<FoundDevice> = withContext(Dispatchers.IO) {
         val wifi = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val lock = wifi.createMulticastLock("uniremote-ssdp").apply { setReferenceCounted(false); acquire() }
         val found = LinkedHashMap<String, FoundDevice>()
         try {
             DatagramSocket().use { socket ->
                 socket.soTimeout = 1000
-                val msg = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: urn:lge-com:service:webos-second-screen:1\r\n\r\n"
+                val msg = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: $st\r\n\r\n"
                 val data = msg.toByteArray()
                 val group = InetAddress.getByName("239.255.255.250")
                 repeat(2) { socket.send(DatagramPacket(data, data.size, group, 1900)) }
@@ -38,10 +64,9 @@ object Discovery {
                     val p = DatagramPacket(buf, buf.size)
                     try { socket.receive(p) } catch (_: SocketTimeoutException) { continue }
                     val text = String(p.data, 0, p.length)
-                    if (!text.contains("webos", ignoreCase = true) && !text.contains("LGE", ignoreCase = true)) continue
                     val ip = p.address.hostAddress ?: continue
-                    val server = text.lines().firstOrNull { it.startsWith("SERVER", true) }?.substringAfter(":")?.trim()
-                    found.putIfAbsent(ip, FoundDevice(ip, server?.take(40) ?: "LG webOS TV"))
+                    val dev = parse(text, ip) ?: continue
+                    found.putIfAbsent(ip, dev)
                 }
             }
         } catch (e: Exception) {

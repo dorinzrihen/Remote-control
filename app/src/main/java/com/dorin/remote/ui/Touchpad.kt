@@ -23,7 +23,7 @@ import com.dorin.remote.Target
 import kotlin.math.abs
 
 /**
- * LG target: one finger = move cursor, tap = click, two fingers = scroll.
+ * LG / Samsung target: one finger = move cursor, tap = click, two fingers = scroll (LG only).
  * Xiaomi target: swipe = d-pad step (repeats while you keep dragging), tap = OK.
  */
 @Composable
@@ -39,6 +39,7 @@ fun Touchpad(
     val view = LocalView.current
     val hint = when (target) {
         Target.LG -> "Touchpad · drag to move the cursor · tap to click · two fingers to scroll"
+        Target.SAMSUNG -> "Touchpad · drag to move the cursor · tap to click"
         Target.ATV -> "Touchpad · swipe to move · tap for OK"
     }
     Box(
@@ -65,10 +66,11 @@ fun Touchpad(
                         val delta: Offset = primary.positionChange()
                         if (delta != Offset.Zero) {
                             moved += abs(delta.x) + abs(delta.y)
+                            val cursor = target == Target.LG || target == Target.SAMSUNG
                             if (twoFinger && target == Target.LG) {
                                 lastScrollY += delta.y
                                 if (abs(lastScrollY) >= 6f) { onScroll(lastScrollY / 2f); lastScrollY = 0f }
-                            } else if (target == Target.LG) {
+                            } else if (cursor) {
                                 val sx = delta.x * speed + restX
                                 val sy = delta.y * speed + restY
                                 val ix = sx.toInt(); val iy = sy.toInt()

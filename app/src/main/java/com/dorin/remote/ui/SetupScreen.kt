@@ -43,14 +43,22 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dorin.remote.RemoteViewModel
+import com.dorin.remote.SAMSUNG_HDMI_KEYS
 import com.dorin.remote.atv.AtvState
+import com.dorin.remote.tizen.SamsungState
 import com.dorin.remote.webos.LgState
 
 @Composable
 fun SetupScreen(vm: RemoteViewModel) {
     val lgIp by vm.lgIp.collectAsState()
     val atvIp by vm.atvIp.collectAsState()
+    val samsungIp by vm.samsungIp.collectAsState()
     val lgState by vm.lg.state.collectAsState()
+    val samsungState by vm.samsung.state.collectAsState()
+    val samsungFound by vm.samsungFound.collectAsState()
+    val samsungMac by vm.samsung.macAddress.collectAsState()
+    val samsungName by vm.samsung.tvName.collectAsState()
+    val xiaomiSamsungKey by vm.xiaomiSamsungKey.collectAsState()
     val atvState by vm.atv.state.collectAsState()
     val lgFound by vm.lgFound.collectAsState()
     val atvFound by vm.atvFound.collectAsState()
@@ -67,6 +75,7 @@ fun SetupScreen(vm: RemoteViewModel) {
 
     var lgIpEdit by remember(lgIp) { mutableStateOf(lgIp) }
     var atvIpEdit by remember(atvIp) { mutableStateOf(atvIp) }
+    var samsungIpEdit by remember(samsungIp) { mutableStateOf(samsungIp) }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -79,7 +88,7 @@ fun SetupScreen(vm: RemoteViewModel) {
             OutlinedButton(onClick = vm::scan, enabled = !scanning) { Text(if (scanning) "Scanning…" else "Scan the network") }
             if (scanning) { Spacer(Modifier.width(10.dp)); CircularProgressIndicator(Modifier.width(20.dp).height(20.dp), strokeWidth = 2.dp) }
         }
-        Text("Phone, TV and Xiaomi must be on the same Wi-Fi.", color = TextDim, fontSize = 12.sp)
+        Text("Phone, TV and Xiaomi must be on the same Wi-Fi. Set up only the devices you have; the others stay hidden.", color = TextDim, fontSize = 12.sp)
 
         // ---------------- LG ----------------
         Section("LG TV (webOS)", Accent) {
@@ -88,7 +97,7 @@ fun SetupScreen(vm: RemoteViewModel) {
                 is LgState.Connecting -> "Connecting…"
                 is LgState.WaitingForPrompt -> "Look at the TV and press Yes / Accept"
                 is LgState.Error -> "Error: ${(lgState as LgState.Error).message}"
-                else -> "Not connected"
+                else -> if (lgIp.isEmpty()) "Not set up" else "Not connected"
             }, lgState is LgState.Connected)
             lgFound.forEach { d -> FoundRow(d.name, d.ip) { lgIpEdit = d.ip } }
             OutlinedTextField(
@@ -98,6 +107,7 @@ fun SetupScreen(vm: RemoteViewModel) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { vm.saveLg(lgIpEdit) }, colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Bg)) { Text("Connect") }
                 TextButton(onClick = vm::forgetLg) { Text("Forget pairing", color = TextDim) }
+                if (lgIp.isNotEmpty()) TextButton(onClick = { lgIpEdit = ""; vm.saveLg("") }) { Text("Remove", color = Danger) }
             }
             Text("First time: the TV shows a prompt. Press Yes with the LG remote.", color = TextDim, fontSize = 12.sp)
             if (mac != null) Text("MAC $mac (used to turn the TV on)", color = TextDim, fontSize = 12.sp)
@@ -115,6 +125,46 @@ fun SetupScreen(vm: RemoteViewModel) {
                 }
             }
             Text("The app then switches to Xiaomi mode automatically when the TV shows that input.", color = TextDim, fontSize = 12.sp)
+        }
+
+
+        // ---------------- Samsung ----------------
+        Section("Samsung TV (Tizen, 2016 or newer)", AccentSamsung) {
+            StatusLine(when (samsungState) {
+                is SamsungState.Connected -> "Connected" + (samsungName?.let { " · $it" } ?: "")
+                is SamsungState.Connecting -> "Connecting…"
+                is SamsungState.WaitingForPrompt -> "Look at the TV and choose Allow"
+                is SamsungState.Error -> "Error: ${(samsungState as SamsungState.Error).message}"
+                else -> if (samsungIp.isEmpty()) "Not set up" else "Not connected"
+            }, samsungState is SamsungState.Connected)
+            samsungFound.forEach { d -> FoundRow(d.name, d.ip) { samsungIpEdit = d.ip } }
+            OutlinedTextField(
+                value = samsungIpEdit, onValueChange = { samsungIpEdit = it }, label = { Text("Samsung TV IP address") },
+                singleLine = true, modifier = Modifier.fillMaxWidth(), colors = fieldColors(),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { vm.saveSamsung(samsungIpEdit) }, colors = ButtonDefaults.buttonColors(containerColor = AccentSamsung, contentColor = Bg)) { Text("Connect") }
+                TextButton(onClick = vm::forgetSamsung) { Text("Forget pairing", color = TextDim) }
+                if (samsungIp.isNotEmpty()) TextButton(onClick = { samsungIpEdit = ""; vm.saveSamsung("") }) { Text("Remove", color = Danger) }
+            }
+            Text("First time: the TV asks whether to allow UniRemote. Choose Allow with the Samsung remote.", color = TextDim, fontSize = 12.sp)
+            if (samsungMac != null) Text("MAC $samsungMac (used to turn the TV on)", color = TextDim, fontSize = 12.sp)
+
+            if (atvIp.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text("Which HDMI input is the Xiaomi on?", color = TextMain, fontSize = 14.sp)
+                Box {
+                    var open by remember { mutableStateOf(false) }
+                    OutlinedButton(onClick = { open = true }) {
+                        Text(SAMSUNG_HDMI_KEYS.firstOrNull { it.first == xiaomiSamsungKey }?.second ?: "Choose input")
+                    }
+                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                        SAMSUNG_HDMI_KEYS.forEach { (key, label) -> DropdownMenuItem(text = { Text(label) }, onClick = { open = false; vm.setXiaomiSamsungKey(key) }) }
+                        DropdownMenuItem(text = { Text("None") }, onClick = { open = false; vm.setXiaomiSamsungKey(null) })
+                    }
+                }
+                Text("The Xiaomi tab then switches the TV to that input.", color = TextDim, fontSize = 12.sp)
+            }
         }
 
         // ---------------- Xiaomi ----------------
@@ -143,22 +193,29 @@ fun SetupScreen(vm: RemoteViewModel) {
         val lgApps by vm.lgApps.collectAsState()
         val chosen by vm.lgShortcutIds.collectAsState()
         val web by vm.webShortcuts.collectAsState()
+        val samsungApps by vm.samsungApps.collectAsState()
+        val samsungChosen by vm.samsungShortcutIds.collectAsState()
         Section("Shortcut buttons", Accent) {
-            Text(
-                if (lgApps.isEmpty()) "Connect to the LG TV once to load its app list." else "Tick the TV apps you want as buttons:",
-                color = TextDim, fontSize = 12.sp,
-            )
-            lgApps.forEach { app ->
-                Row(
-                    Modifier.fillMaxWidth().clickable {
+            if (lgIp.isNotEmpty() || samsungIp.isEmpty()) {
+                Text(
+                    if (lgApps.isEmpty()) "Connect to the LG TV once to load its app list." else "LG TV apps (tick the ones you want as buttons):",
+                    color = TextDim, fontSize = 12.sp,
+                )
+                lgApps.forEach { app ->
+                    AppTickRow(app.title, app.id, app.id in chosen) {
                         vm.setLgShortcuts(if (app.id in chosen) chosen - app.id else chosen + app.id)
-                    }.padding(vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    androidx.compose.material3.Checkbox(checked = app.id in chosen, onCheckedChange = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text(app.title, color = TextMain, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    Text(app.id, color = TextDim, fontSize = 10.sp)
+                    }
+                }
+            }
+            if (samsungIp.isNotEmpty()) {
+                Text(
+                    if (samsungApps.isEmpty()) "Connect to the Samsung TV once to load its app list." else "Samsung TV apps:",
+                    color = AccentSamsung, fontSize = 12.sp,
+                )
+                samsungApps.forEach { app ->
+                    AppTickRow(app.name, app.id, app.id in samsungChosen) {
+                        vm.setSamsungShortcuts(if (app.id in samsungChosen) samsungChosen - app.id else samsungChosen + app.id)
+                    }
                 }
             }
             Spacer(Modifier.height(6.dp))
@@ -257,6 +314,19 @@ private fun Section(title: String, color: Color, content: @Composable () -> Unit
     ) {
         Text(title, color = color, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         content()
+    }
+}
+
+@Composable
+private fun AppTickRow(title: String, id: String, checked: Boolean, onToggle: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = null)
+        Spacer(Modifier.width(6.dp))
+        Text(title, color = TextMain, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Text(id, color = TextDim, fontSize = 10.sp)
     }
 }
 

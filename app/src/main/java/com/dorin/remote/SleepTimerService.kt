@@ -55,6 +55,7 @@ class SleepTimerService : Service() {
         val app = App.instance
         Diag.log("Sleep", "timer expired, turning TV off")
         app.lg.powerOff()
+        if (app.samsung.isConnected) app.samsung.powerToggle()
         if (app.atv.isConnected) app.atv.key(AtvKeys.SLEEP)
     }
 

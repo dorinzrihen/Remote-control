@@ -16,6 +16,8 @@ import java.util.concurrent.TimeUnit
 object IconCache {
     private val http = OkHttpClient.Builder().connectTimeout(4, TimeUnit.SECONDS).readTimeout(6, TimeUnit.SECONDS).build()
     private val mem = ConcurrentHashMap<String, Bitmap>()
+    /** Bumped whenever an icon arrives later (Samsung sends them over the channel), so buttons redraw. */
+    val version = kotlinx.coroutines.flow.MutableStateFlow(0)
 
     private fun file(ctx: Context, key: String): File {
         val dir = File(ctx.filesDir, "icons").apply { mkdirs() }
@@ -38,6 +40,16 @@ object IconCache {
                 bmp
             }
         }.getOrNull()
+    }
+
+    fun has(ctx: Context, key: String): Boolean = mem.containsKey(key) || file(ctx, key).exists()
+
+    /** Stores icon bytes that arrived some other way than a URL (e.g. base64 from a Samsung TV). */
+    fun store(ctx: Context, key: String, bytes: ByteArray) {
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+        file(ctx, key).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        mem[key] = bmp
+        version.value = version.value + 1
     }
 
     fun faviconUrl(siteUrl: String): String {

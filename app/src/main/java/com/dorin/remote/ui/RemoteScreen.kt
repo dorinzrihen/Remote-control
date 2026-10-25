@@ -79,29 +79,42 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.dorin.remote.Key
 import com.dorin.remote.RemoteViewModel
 import com.dorin.remote.Target
+import com.dorin.remote.SAMSUNG_HDMI_KEYS
 import com.dorin.remote.atv.AtvState
+import com.dorin.remote.tizen.SamsungState
 import com.dorin.remote.webos.LgState
+
+fun Target.accent(): Color = when (this) { Target.LG -> Accent; Target.SAMSUNG -> AccentSamsung; Target.ATV -> AccentAtv }
 
 @Composable
 fun RemoteScreen(vm: RemoteViewModel) {
     val target by vm.target.collectAsState()
     val lgState by vm.lg.state.collectAsState()
     val atvState by vm.atv.state.collectAsState()
+    val samsungState by vm.samsung.state.collectAsState()
+    val targets by vm.targets.collectAsState()
     val keyboardOpen by vm.keyboardOpen.collectAsState()
     val speed by vm.pointerSpeed.collectAsState()
     val inputs by vm.lg.inputs.collectAsState()
     val volume by vm.lg.volume.collectAsState()
     val muted by vm.lg.muted.collectAsState()
-    val accent = if (target == Target.LG) Accent else AccentAtv
+    val accent = target.accent()
+    val tvIsSamsung = remember(target, targets) { vm.tvTarget() == Target.SAMSUNG }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 8.dp)) {
         // Header: status + settings
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StatusDot("LG TV", lgState is LgState.Connected, lgState is LgState.Connecting || lgState is LgState.WaitingForPrompt, Accent)
-            Spacer(Modifier.width(14.dp))
-            StatusDot("Xiaomi", atvState is AtvState.Connected, atvState is AtvState.Connecting, AccentAtv)
+            if (Target.LG in targets) {
+                StatusDot("LG TV", lgState is LgState.Connected, lgState is LgState.Connecting || lgState is LgState.WaitingForPrompt, Accent)
+                Spacer(Modifier.width(14.dp))
+            }
+            if (Target.SAMSUNG in targets) {
+                StatusDot("Samsung", samsungState is SamsungState.Connected, samsungState is SamsungState.Connecting || samsungState is SamsungState.WaitingForPrompt, AccentSamsung)
+                Spacer(Modifier.width(14.dp))
+            }
+            if (Target.ATV in targets) StatusDot("Xiaomi", atvState is AtvState.Connected, atvState is AtvState.Connecting, AccentAtv)
             Spacer(Modifier.weight(1f))
-            if (volume != null) Text(if (muted) "muted" else "vol $volume", color = TextDim, fontSize = 12.sp)
+            if (volume != null && !tvIsSamsung) Text(if (muted) "muted" else "vol $volume", color = TextDim, fontSize = 12.sp)
             IconButton(onClick = { vm.showSetup.value = true }) { Icon(Icons.Default.Settings, "Settings", tint = TextDim) }
         }
 
@@ -133,8 +146,11 @@ fun RemoteScreen(vm: RemoteViewModel) {
 
         // Target switch
         Row(Modifier.fillMaxWidth().background(Surface1, RoundedCornerShape(14.dp)).padding(4.dp)) {
-            TargetTab("LG TV", target == Target.LG, Accent, Modifier.weight(1f)) { vm.target.value = Target.LG }
-            TargetTab("Xiaomi", target == Target.ATV, AccentAtv, Modifier.weight(1f)) { vm.goToXiaomi() }
+            targets.forEach { t ->
+                TargetTab(t.label, target == t, t.accent(), Modifier.weight(1f)) {
+                    if (t == Target.ATV) vm.goToXiaomi() else vm.target.value = t
+                }
+            }
         }
         Spacer(Modifier.height(8.dp))
 
@@ -153,15 +169,23 @@ fun RemoteScreen(vm: RemoteViewModel) {
 
         // Power / input / keyboard row
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            RemoteButton(icon = Icons.Default.PowerSettingsNew, label = "TV power", size = 46.dp, contentColor = Danger) { vm.lgPower() }
-            RemoteButton(icon = Icons.Default.Tv, label = "Xiaomi power", size = 46.dp, contentColor = AccentAtv) { vm.atvPower() }
+            RemoteButton(icon = Icons.Default.PowerSettingsNew, label = "TV power", size = 46.dp, contentColor = Danger) { vm.tvPower() }
+            if (Target.ATV in targets) RemoteButton(icon = Icons.Default.Tv, label = "Xiaomi power", size = 46.dp, contentColor = AccentAtv) { vm.atvPower() }
             Box {
                 var open by remember { mutableStateOf(false) }
                 RemoteButton(icon = Icons.Default.Input, label = "Input", size = 46.dp) { open = true }
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                    if (inputs.isEmpty()) DropdownMenuItem(text = { Text("Connect to LG TV first") }, onClick = { open = false })
-                    inputs.forEach { i ->
-                        DropdownMenuItem(text = { Text(i.label.ifEmpty { i.id }) }, onClick = { open = false; vm.switchLgInput(i.id) })
+                    if (tvIsSamsung) {
+                        DropdownMenuItem(text = { Text("Source menu") }, onClick = { open = false; vm.switchSamsungInput("KEY_SOURCE") })
+                        DropdownMenuItem(text = { Text("TV") }, onClick = { open = false; vm.switchSamsungInput("KEY_TV") })
+                        SAMSUNG_HDMI_KEYS.forEach { (key, label) ->
+                            DropdownMenuItem(text = { Text(label) }, onClick = { open = false; vm.switchSamsungInput(key) })
+                        }
+                    } else {
+                        if (inputs.isEmpty()) DropdownMenuItem(text = { Text("Connect to LG TV first") }, onClick = { open = false })
+                        inputs.forEach { i ->
+                            DropdownMenuItem(text = { Text(i.label.ifEmpty { i.id }) }, onClick = { open = false; vm.switchLgInput(i.id) })
+                        }
                     }
                 }
             }
@@ -236,7 +260,9 @@ fun RemoteScreen(vm: RemoteViewModel) {
         val lgShortcutIds by vm.lgShortcutIds.collectAsState()
         val webShortcuts by vm.webShortcuts.collectAsState()
         val lgApps by vm.lgApps.collectAsState()
-        val shortcuts = remember(target, lgShortcutIds, webShortcuts, lgApps) { vm.shortcutsFor(target) }
+        val samsungShortcutIds by vm.samsungShortcutIds.collectAsState()
+        val samsungApps by vm.samsungApps.collectAsState()
+        val shortcuts = remember(target, lgShortcutIds, samsungShortcutIds, webShortcuts, lgApps, samsungApps) { vm.shortcutsFor(target) }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             shortcuts.forEach { sc -> ShortcutButton(sc) { vm.launch(sc) } }
             if (shortcuts.isEmpty()) Text("Choose shortcuts in Settings", color = TextDim, fontSize = 12.sp)
@@ -287,6 +313,11 @@ private fun KeyboardBar(vm: RemoteViewModel, accent: Color, target: Target) {
             color = if (tvFocused) AccentAtv else Color(0xFFE0AF68), fontSize = 11.sp,
             modifier = Modifier.padding(bottom = 4.dp),
         )
+    } else if (target == Target.SAMSUNG) {
+        Text(
+            "Open a text field on the TV first (its keyboard should appear). Enter sends the text.",
+            color = TextDim, fontSize = 11.sp, modifier = Modifier.padding(bottom = 4.dp),
+        )
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
@@ -319,7 +350,8 @@ private fun KeyboardBar(vm: RemoteViewModel, accent: Color, target: Target) {
 private fun ShortcutButton(sc: com.dorin.remote.Shortcut, onPress: () -> Unit) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val view = androidx.compose.ui.platform.LocalView.current
-    val bmp by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(null, sc.iconKey, sc.iconUrl) {
+    val iconVersion by com.dorin.remote.net.IconCache.version.collectAsState()
+    val bmp by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(null, sc.iconKey, sc.iconUrl, iconVersion) {
         value = com.dorin.remote.net.IconCache.get(ctx, sc.iconKey, sc.iconUrl)
     }
     var pressed by remember { mutableStateOf(false) }

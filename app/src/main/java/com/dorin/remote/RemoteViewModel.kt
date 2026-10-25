@@ -10,14 +10,20 @@ import com.dorin.remote.atv.AtvState
 import com.dorin.remote.net.Discovery
 import com.dorin.remote.net.FoundDevice
 import com.dorin.remote.net.Wol
+import com.dorin.remote.tizen.SamsungApp
+import com.dorin.remote.tizen.SamsungClient
+import com.dorin.remote.tizen.SamsungState
 import com.dorin.remote.webos.LgState
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-enum class Target { LG, ATV }
+enum class Target(val label: String) { LG("LG TV"), SAMSUNG("Samsung"), ATV("Xiaomi") }
 
 enum class Key {
     UP, DOWN, LEFT, RIGHT, OK, BACK, HOME, MENU, EXIT, INFO,
@@ -27,8 +33,8 @@ enum class Key {
     N0, N1, N2, N3, N4, N5, N6, N7, N8, N9,
 }
 
-/** A button in the shortcuts row. Exactly one of lgId / atvLink / url is used depending on the target. */
-data class Shortcut(val label: String, val lgId: String? = null, val atvLink: String? = null, val url: String? = null,
+/** A button in the shortcuts row. Exactly one of lgId / samsungApp / atvLink / url is used depending on the target. */
+data class Shortcut(val label: String, val lgId: String? = null, val samsungApp: SamsungApp? = null, val atvLink: String? = null, val url: String? = null,
                     val iconKey: String = label, val iconUrl: String? = null)
 
 /** Android TV deep links for well-known LG app ids, so the same shortcut works on the Xiaomi. */
@@ -40,35 +46,54 @@ val ATV_LINKS = mapOf(
     "spotify-beehive" to "https://open.spotify.com",
 )
 
+/** Samsung remote keys that select an HDMI input (for "which HDMI is the Xiaomi on"). */
+val SAMSUNG_HDMI_KEYS = listOf("KEY_HDMI1" to "HDMI 1", "KEY_HDMI2" to "HDMI 2", "KEY_HDMI3" to "HDMI 3", "KEY_HDMI4" to "HDMI 4")
+
 class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     private val tag = "RemoteVM"
     private val application = app as App
     val prefs = application.prefs
     val lg = application.lg
     val atv = application.atv
+    val samsung = application.samsung
 
-    val target = MutableStateFlow(Target.LG)
-    val showSetup = MutableStateFlow(prefs.lgIp.isEmpty() && prefs.atvIp.isEmpty())
+    // setup screen state
+    val lgIp = MutableStateFlow(prefs.lgIp)
+    val samsungIp = MutableStateFlow(prefs.samsungIp)
+    val atvIp = MutableStateFlow(prefs.atvIp)
+
+    /** Devices that have an IP configured, in tab order. Falls back to LG + Xiaomi so the screen is never empty. */
+    val targets: StateFlow<List<Target>> = combine(lgIp, samsungIp, atvIp) { l, s, a ->
+        buildList {
+            if (l.isNotEmpty()) add(Target.LG)
+            if (s.isNotEmpty()) add(Target.SAMSUNG)
+            if (a.isNotEmpty()) add(Target.ATV)
+        }.ifEmpty { listOf(Target.LG, Target.ATV) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, listOf(Target.LG, Target.ATV))
+
+    val target = MutableStateFlow(targets.value.first())
+    val showSetup = MutableStateFlow(prefs.lgIp.isEmpty() && prefs.atvIp.isEmpty() && prefs.samsungIp.isEmpty())
     val showQuick = MutableStateFlow(false)
     val sleepEnd = SleepTimerService.endTime
     val keyboardOpen = MutableStateFlow(false)
     val messages = MutableSharedFlow<String>(extraBufferCapacity = 4)
 
-    // setup screen state
-    val lgIp = MutableStateFlow(prefs.lgIp)
-    val atvIp = MutableStateFlow(prefs.atvIp)
     val lgFound = MutableStateFlow<List<FoundDevice>>(emptyList())
+    val samsungFound = MutableStateFlow<List<FoundDevice>>(emptyList())
     val atvFound = MutableStateFlow<List<FoundDevice>>(emptyList())
     val scanning = MutableStateFlow(false)
     val pairingSession = MutableStateFlow<AtvClient.PairingSession?>(null)
     val pairingError = MutableStateFlow<String?>(null)
     val pairingBusy = MutableStateFlow(false)
     val xiaomiInputId = MutableStateFlow(prefs.xiaomiInputId)
+    val xiaomiSamsungKey = MutableStateFlow(prefs.xiaomiSamsungKey)
     val pointerSpeed = MutableStateFlow(prefs.pointerSpeed)
     val autoKeyboard = MutableStateFlow(prefs.autoKeyboard)
     val lgShortcutIds = MutableStateFlow(prefs.lgShortcuts)
+    val samsungShortcutIds = MutableStateFlow(prefs.samsungShortcuts)
     val webShortcuts = MutableStateFlow(prefs.webShortcuts)
     val lgApps = MutableStateFlow(loadAppsCache())
+    val samsungApps = MutableStateFlow(loadSamsungAppsCache())
     /** Text recognised from the phone microphone, consumed by the keyboard bar. */
     val voiceText = MutableStateFlow<String?>(null)
     // self-update via GitHub Releases
@@ -93,6 +118,10 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
                 .onFailure { Log.w(tag, "update check failed: ${it.message}") }
         }
         viewModelScope.launch {
+            // If the device of the current tab is removed in setup, jump to the first remaining one.
+            targets.collect { list -> if (target.value !in list) target.value = list.first() }
+        }
+        viewModelScope.launch {
             lg.apps.collect { list ->
                 if (list.isNotEmpty()) {
                     lgApps.value = list
@@ -101,7 +130,20 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch {
+            samsung.apps.collect { list ->
+                if (list.isNotEmpty()) {
+                    samsungApps.value = list
+                    prefs.samsungAppsCache = org.json.JSONArray(list.map {
+                        org.json.JSONObject().put("id", it.id).put("name", it.name).put("type", it.type).put("icon", it.iconPath)
+                    }).toString()
+                }
+            }
+        }
+        viewModelScope.launch {
             lg.macAddress.collect { mac -> if (mac != null) prefs.lgMac = mac }
+        }
+        viewModelScope.launch {
+            samsung.macAddress.collect { mac -> if (mac != null) prefs.samsungMac = mac }
         }
         viewModelScope.launch {
             // Auto-open the phone keyboard when the LG TV focuses a text field.
@@ -121,15 +163,21 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     fun connectAll() {
         if (prefs.lgIp.isNotEmpty()) lg.connect(prefs.lgIp, prefs.lgKey) else lg.disconnect()
+        if (prefs.samsungIp.isNotEmpty()) samsung.connect(prefs.samsungIp, prefs.samsungToken) else samsung.disconnect()
         if (prefs.atvIp.isNotEmpty() && prefs.atvPaired) atv.connect(prefs.atvIp) else atv.disconnect()
     }
 
     fun reconnect() {
         if (lg.state.value !is LgState.Connected && prefs.lgIp.isNotEmpty()) lg.connect(prefs.lgIp, prefs.lgKey)
+        if (samsung.state.value !is SamsungState.Connected && prefs.samsungIp.isNotEmpty()) samsung.connect(prefs.samsungIp, prefs.samsungToken)
         if (atv.state.value !is AtvState.Connected && prefs.atvIp.isNotEmpty() && prefs.atvPaired) atv.connect(prefs.atvIp)
     }
 
     private fun say(msg: String) { messages.tryEmit(msg) }
+
+    /** Which TV the power / input buttons and the Xiaomi's volume refer to. */
+    fun tvTarget(): Target =
+        if (target.value == Target.SAMSUNG || (prefs.lgIp.isEmpty() && prefs.samsungIp.isNotEmpty())) Target.SAMSUNG else Target.LG
 
     // ---------- routing ----------
 
@@ -137,7 +185,10 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         when (key) {
             Key.VOL_UP, Key.VOL_DOWN, Key.MUTE -> {
                 // Volume goes to the TV whenever it is reachable: over HDMI ARC the TV forwards it to the soundbar.
-                if (lg.isConnected) {
+                val useSamsung = (tvTarget() == Target.SAMSUNG && samsung.isConnected) || (!lg.isConnected && samsung.isConnected)
+                if (useSamsung) {
+                    when (key) { Key.VOL_UP -> samsung.volumeUp(); Key.VOL_DOWN -> samsung.volumeDown(); else -> samsung.mute() }
+                } else if (lg.isConnected) {
                     when (key) {
                         Key.VOL_UP -> lg.volumeUp()
                         Key.VOL_DOWN -> lg.volumeDown()
@@ -153,6 +204,10 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             Target.LG -> {
                 if (!lg.isConnected) { say("LG TV not connected"); return }
                 lgButton(key)
+            }
+            Target.SAMSUNG -> {
+                if (!samsung.isConnected) { say("Samsung TV not connected"); return }
+                samsungKey(key)?.let { samsung.key(it) } ?: say("Not available on Samsung")
             }
             Target.ATV -> {
                 if (!atv.isConnected) { say("Xiaomi not connected"); return }
@@ -177,6 +232,20 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         lg.button(name)
     }
 
+    /** Tizen remote key names. */
+    private fun samsungKey(key: Key): String? = when (key) {
+        Key.UP -> "KEY_UP"; Key.DOWN -> "KEY_DOWN"; Key.LEFT -> "KEY_LEFT"; Key.RIGHT -> "KEY_RIGHT"; Key.OK -> "KEY_ENTER"
+        Key.BACK -> "KEY_RETURN"; Key.HOME -> "KEY_HOME"; Key.MENU -> "KEY_MENU"; Key.EXIT -> "KEY_EXIT"; Key.INFO -> "KEY_INFO"
+        Key.PLAY -> "KEY_PLAY"; Key.PAUSE -> "KEY_PAUSE"; Key.PLAY_PAUSE -> "KEY_PLAY"; Key.STOP -> "KEY_STOP"
+        Key.REWIND -> "KEY_REWIND"; Key.FAST_FORWARD -> "KEY_FF"
+        Key.VOL_UP -> "KEY_VOLUP"; Key.VOL_DOWN -> "KEY_VOLDOWN"; Key.MUTE -> "KEY_MUTE"
+        Key.CH_UP -> "KEY_CHUP"; Key.CH_DOWN -> "KEY_CHDOWN"; Key.SETTINGS -> "KEY_MENU"
+        Key.RED -> "KEY_RED"; Key.GREEN -> "KEY_GREEN"; Key.YELLOW -> "KEY_YELLOW"; Key.BLUE -> "KEY_CYAN"
+        Key.N0 -> "KEY_0"; Key.N1 -> "KEY_1"; Key.N2 -> "KEY_2"; Key.N3 -> "KEY_3"; Key.N4 -> "KEY_4"
+        Key.N5 -> "KEY_5"; Key.N6 -> "KEY_6"; Key.N7 -> "KEY_7"; Key.N8 -> "KEY_8"; Key.N9 -> "KEY_9"
+        Key.SEARCH -> null
+    }
+
     private fun atvKey(key: Key): Int? = when (key) {
         Key.UP -> AtvKeys.DPAD_UP; Key.DOWN -> AtvKeys.DPAD_DOWN; Key.LEFT -> AtvKeys.DPAD_LEFT; Key.RIGHT -> AtvKeys.DPAD_RIGHT
         Key.OK -> AtvKeys.DPAD_CENTER; Key.BACK -> AtvKeys.BACK; Key.HOME -> AtvKeys.HOME; Key.MENU -> AtvKeys.MENU
@@ -195,12 +264,17 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- touchpad ----------
 
     fun pointerMove(dx: Float, dy: Float) {
-        if (target.value == Target.LG) lg.move(dx.toInt(), dy.toInt())
+        when (target.value) {
+            Target.LG -> lg.move(dx.toInt(), dy.toInt())
+            Target.SAMSUNG -> samsung.move(dx.toInt(), dy.toInt())
+            Target.ATV -> {}
+        }
     }
 
     fun pointerClick() {
         when (target.value) {
             Target.LG -> lg.click()
+            Target.SAMSUNG -> samsung.click()
             Target.ATV -> atv.key(AtvKeys.DPAD_CENTER)
         }
     }
@@ -210,6 +284,9 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---------- power / input ----------
+
+    /** The power button of whichever TV is active. */
+    fun tvPower() { if (tvTarget() == Target.SAMSUNG) samsungPower() else lgPower() }
 
     fun lgPower() {
         viewModelScope.launch {
@@ -225,6 +302,21 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun samsungPower() {
+        viewModelScope.launch {
+            if (samsung.isConnected) {
+                // The TV keeps the connection open in network standby, so KEY_POWER both turns it off and on.
+                samsung.powerToggle(); say("Power sent to Samsung TV")
+            } else {
+                val mac = prefs.samsungMac
+                if (mac == null) { say("TV MAC unknown yet. Connect once while it is on.") ; return@launch }
+                runCatching { Wol.send(mac, prefs.samsungIp) }
+                say("Wake-on-LAN sent")
+                reconnect()
+            }
+        }
+    }
+
     fun atvPower() {
         if (atv.isConnected) atv.key(AtvKeys.POWER) else say("Xiaomi not connected")
     }
@@ -234,9 +326,20 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         if (id == xiaomiInputId.value) target.value = Target.ATV
     }
 
+    fun switchSamsungInput(key: String) {
+        if (!samsung.isConnected) { say("Samsung TV not connected"); return }
+        samsung.key(key)
+        if (key == xiaomiSamsungKey.value) target.value = Target.ATV
+    }
+
     fun goToXiaomi() {
-        val id = xiaomiInputId.value
-        if (id != null && lg.isConnected) lg.switchInput(id)
+        if (tvTarget() == Target.SAMSUNG) {
+            val key = xiaomiSamsungKey.value
+            if (key != null && samsung.isConnected) samsung.key(key)
+        } else {
+            val id = xiaomiInputId.value
+            if (id != null && lg.isConnected) lg.switchInput(id)
+        }
         target.value = Target.ATV
     }
 
@@ -245,15 +348,31 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         (0 until arr.length()).map { arr.getJSONObject(it) }.map { com.dorin.remote.webos.LgApp(it.getString("id"), it.getString("title"), it.optString("icon").ifEmpty { null }) }
     }.getOrDefault(emptyList())
 
+    private fun loadSamsungAppsCache(): List<SamsungApp> = runCatching {
+        val arr = org.json.JSONArray(prefs.samsungAppsCache ?: return emptyList())
+        (0 until arr.length()).map { arr.getJSONObject(it) }.map { SamsungApp(it.getString("id"), it.getString("name"), it.optInt("type", 2), it.optString("icon")) }
+    }.getOrDefault(emptyList())
+
     /** Shortcut buttons for the current target. */
     fun shortcutsFor(t: Target): List<Shortcut> {
-        val apps = lgApps.value.associateBy { it.id }
-        val appButtons = lgShortcutIds.value.mapNotNull { id ->
-            val app = apps[id]
-            val title = app?.title ?: ATV_LINKS.keys.firstOrNull { it == id }?.let { id.substringBefore('.').replaceFirstChar(Char::uppercase) } ?: id
-            when (t) {
-                Target.LG -> Shortcut(title, lgId = id, iconKey = "app:$id", iconUrl = app?.icon)
-                Target.ATV -> ATV_LINKS[id]?.let { Shortcut(title, atvLink = it, iconKey = "app:$id", iconUrl = app?.icon) }
+        val appButtons = when (t) {
+            Target.SAMSUNG -> {
+                val apps = samsungApps.value.associateBy { it.id }
+                samsungShortcutIds.value.map { id ->
+                    val app = apps[id] ?: SamsungApp(id, when (id) { "111299001912" -> "YouTube"; "11101200001" -> "Netflix"; else -> id })
+                    Shortcut(app.name, samsungApp = app, iconKey = SamsungClient.iconKey(id))
+                }
+            }
+            else -> {
+                val apps = lgApps.value.associateBy { it.id }
+                lgShortcutIds.value.mapNotNull { id ->
+                    val app = apps[id]
+                    val title = app?.title ?: ATV_LINKS.keys.firstOrNull { it == id }?.let { id.substringBefore('.').replaceFirstChar(Char::uppercase) } ?: id
+                    when (t) {
+                        Target.LG -> Shortcut(title, lgId = id, iconKey = "app:$id", iconUrl = app?.icon)
+                        else -> ATV_LINKS[id]?.let { Shortcut(title, atvLink = it, iconKey = "app:$id", iconUrl = app?.icon) }
+                    }
+                }
             }
         }
         return appButtons + webShortcuts.value.map {
@@ -266,6 +385,10 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             Target.LG -> when {
                 sc.lgId != null -> lg.launchApp(sc.lgId)
                 sc.url != null -> lg.openUrl(sc.url)
+            }
+            Target.SAMSUNG -> when {
+                sc.samsungApp != null -> samsung.launchApp(sc.samsungApp)
+                sc.url != null -> samsung.openUrl(sc.url)
             }
             Target.ATV -> when {
                 sc.atvLink != null -> atv.launchApp(sc.atvLink)
@@ -298,12 +421,14 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     fun playYouTube(v: com.dorin.remote.net.YtVideo) {
         when (target.value) {
             Target.LG -> lg.playYouTube(v.id)
+            Target.SAMSUNG -> samsung.playYouTube(v.id)
             Target.ATV -> atv.launchApp("https://www.youtube.com/watch?v=${v.id}")
         }
         say("Playing on TV: ${v.title}")
     }
 
     fun setLgShortcuts(ids: List<String>) { prefs.lgShortcuts = ids; lgShortcutIds.value = ids }
+    fun setSamsungShortcuts(ids: List<String>) { prefs.samsungShortcuts = ids; samsungShortcutIds.value = ids }
     fun setWebShortcuts(list: List<Pair<String, String>>) { prefs.webShortcuts = list; webShortcuts.value = list }
 
     fun installUpdate() {
@@ -348,6 +473,8 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
                 if (added.isNotEmpty()) err = lg.insertText(added) ?: err
                 if (err != null) sayOnce("TV: $err")
             }
+            // Tizen takes the whole field content each time, so send the full text.
+            Target.SAMSUNG -> samsung.sendText(newText)
             Target.ATV -> {
                 repeat(removed) { atv.key(AtvKeys.DEL) }
                 if (added.isNotEmpty()) atv.sendText(added)
@@ -364,6 +491,11 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     fun keyboardEnter() {
         when (target.value) {
             Target.LG -> viewModelScope.launch { lg.sendEnter()?.let { sayOnce("TV: $it") } }
+            Target.SAMSUNG -> viewModelScope.launch {
+                samsung.inputEnd()
+                kotlinx.coroutines.delay(150)
+                samsung.key("KEY_ENTER")
+            }
             Target.ATV -> atv.key(AtvKeys.ENTER)
         }
         typed = ""
@@ -404,8 +536,9 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val ctx = getApplication<Application>()
                 lgFound.value = Discovery.findLgTvs(ctx)
+                samsungFound.value = Discovery.findSamsungTvs(ctx)
                 atvFound.value = Discovery.findAndroidTvs(ctx)
-                if (lgFound.value.isEmpty() && atvFound.value.isEmpty()) say("Nothing found. Type the IPs manually.")
+                if (lgFound.value.isEmpty() && samsungFound.value.isEmpty() && atvFound.value.isEmpty()) say("Nothing found. Type the IPs manually.")
             } finally { scanning.value = false }
         }
     }
@@ -419,6 +552,16 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun forgetLg() { prefs.lgKey = null; saveLg(lgIp.value) }
+
+    fun saveSamsung(ip: String) {
+        val clean = ip.trim()
+        if (clean != prefs.samsungIp) { prefs.samsungToken = null; prefs.samsungMac = null }
+        prefs.samsungIp = clean
+        samsungIp.value = clean
+        if (clean.isNotEmpty()) samsung.connect(clean, prefs.samsungToken) else samsung.disconnect()
+    }
+
+    fun forgetSamsung() { prefs.samsungToken = null; saveSamsung(samsungIp.value) }
 
     fun startPairing(ip: String) {
         val clean = ip.trim()
@@ -462,6 +605,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setXiaomiInput(id: String?) { prefs.xiaomiInputId = id; xiaomiInputId.value = id }
+    fun setXiaomiSamsungKey(key: String?) { prefs.xiaomiSamsungKey = key; xiaomiSamsungKey.value = key }
     fun setPointerSpeed(v: Float) { prefs.pointerSpeed = v; pointerSpeed.value = v }
     fun setAutoKeyboard(v: Boolean) { prefs.autoKeyboard = v; autoKeyboard.value = v }
 
