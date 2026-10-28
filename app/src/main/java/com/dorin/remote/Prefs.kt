@@ -57,6 +57,10 @@ class Prefs(ctx: Context) {
         get() = (sp.getString("web_shortcuts", null) ?: "Stremio|https://web.stremio.com")
             .split("\n").filter { it.contains("|") }.map { it.substringBefore("|") to it.substringAfter("|") }
         set(v) = sp.edit().putString("web_shortcuts", v.joinToString("\n") { "${it.first}|${it.second}" }).apply()
+    /** JSON array of scene presets (see Scene in RemoteViewModel); null = defaults. */
+    var scenes: String?
+        get() = sp.getString("scenes", null)
+        set(v) = sp.edit().putString("scenes", v).apply()
     var xiaomiInputId: String?
         get() = sp.getString("xiaomi_input", null)
         set(v) = sp.edit().putString("xiaomi_input", v).apply()

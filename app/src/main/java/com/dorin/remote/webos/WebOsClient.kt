@@ -73,6 +73,10 @@ class WebOsClient(
     val backlight = MutableStateFlow<Int?>(null)
     val apps = MutableStateFlow<List<LgApp>>(emptyList())
     val pictureMode = MutableStateFlow<String?>(null)
+    /** TV sound mode id (aiSoundPlus, standard, movie, news, sports, music, game, bassBlast). Shared with the soundbar over HDMI. */
+    val soundMode = MutableStateFlow<String?>(null)
+    /** tv_speaker, external_arc (soundbar only) or tv_speaker_external_arc (TV speakers + soundbar together). */
+    val soundOutput = MutableStateFlow<String?>(null)
 
     val isConnected: Boolean get() = state.value is LgState.Connected
 
@@ -210,6 +214,13 @@ class WebOsClient(
             st.optString("backlight").toIntOrNull()?.let { backlight.value = it }
             st.optString("pictureMode").ifEmpty { null }?.let { pictureMode.value = it }
         }
+        // Verified on webOS 25 (OLED65B6): these two are the only sound keys the TV lets us read.
+        subscribe("ssap://settings/getSystemSettings", JSONObject().put("category", "sound")
+            .put("keys", JSONArray(listOf("soundMode", "soundOutput")))) { p ->
+            val st = p.optJSONObject("settings") ?: return@subscribe
+            st.optString("soundMode").ifEmpty { null }?.let { soundMode.value = it }
+            st.optString("soundOutput").ifEmpty { null }?.let { soundOutput.value = it }
+        }
     }
 
     private fun registrationMessage(id: String): JSONObject {
@@ -336,6 +347,21 @@ class WebOsClient(
         luna("com.webos.settingsservice/setSystemSettings",
             JSONObject().put("category", "picture").put("settings", JSONObject().put(key, value)))
     }
+
+    /** Sound mode ids accepted by webOS 25 with an LG soundbar on eARC: aiSoundPlus, standard, movie, news (Clear Voice), sports, music, game, bassBlast. */
+    suspend fun setSoundMode(mode: String) {
+        Diag.log(TAG, "set soundMode=$mode")
+        luna("com.webos.settingsservice/setSystemSettings",
+            JSONObject().put("category", "sound").put("settings", JSONObject().put("soundMode", mode)))
+    }
+
+    /** output: tv_speaker | external_arc | tv_speaker_external_arc. */
+    suspend fun setSoundOutput(output: String) {
+        Diag.log(TAG, "set soundOutput=$output")
+        request("ssap://com.webos.service.apiadapter/audio/changeSoundOutput", JSONObject().put("output", output))
+    }
+
+    fun setVolume(level: Int) = send("ssap://audio/setVolume", JSONObject().put("volume", level.coerceIn(0, 100)))
 
     fun screenOff() = send("ssap://com.webos.service.tvpower/power/turnOffScreen")
     fun screenOn() = send("ssap://com.webos.service.tvpower/power/turnOnScreen")

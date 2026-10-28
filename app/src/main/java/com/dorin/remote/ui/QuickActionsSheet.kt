@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
@@ -41,12 +43,28 @@ private val PICTURE_MODES = listOf(
     "Standard" to "normal", "Cinema" to "cinema", "Vivid" to "vivid", "Game" to "game", "Eco" to "eco", "Filmmaker" to "filmMaker",
 )
 
+/** webOS sound mode ids verified on webOS 25 with the LG soundbar on eARC. The soundbar follows the TV's mode (Sound Mode Share). */
+private val SOUND_MODES = listOf(
+    "AI Sound Pro" to "aiSoundPlus", "Standard" to "standard", "Cinema" to "movie", "Clear Voice" to "news",
+    "Sports" to "sports", "Music" to "music", "Game" to "game", "Bass Blast" to "bassBlast",
+)
+
+private val SOUND_OUTPUTS = listOf(
+    "TV+Soundbar" to "tv_speaker_external_arc", "Soundbar" to "external_arc", "TV speaker" to "tv_speaker",
+)
+
+private fun label(list: List<Pair<String, String>>, id: String?) = list.firstOrNull { it.second == id }?.first ?: id
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun QuickActionsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     val lgState by vm.lg.state.collectAsState()
     val backlight by vm.lg.backlight.collectAsState()
     val pictureMode by vm.lg.pictureMode.collectAsState()
+    val soundMode by vm.lg.soundMode.collectAsState()
+    val soundOutput by vm.lg.soundOutput.collectAsState()
+    val volume by vm.lg.volume.collectAsState()
+    val scenes by vm.scenes.collectAsState()
     val sleepEnd by vm.sleepEnd.collectAsState()
     val connected = lgState is LgState.Connected
     val hasLg = vm.prefs.lgIp.isNotEmpty()
@@ -65,8 +83,54 @@ fun QuickActionsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Surface1) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Quick actions", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+
+            // ---- Scenes (LG only) ----
+            if (hasLg) {
+                Text("Scenes  ·  tap to apply, hold to save the TV's current picture, sound and volume", color = TextDim, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    scenes.forEachIndexed { i, sc ->
+                        PillButton(sc.name, modifier = Modifier.weight(1f), color = Accent, contentColor = Bg,
+                            onLongPress = { vm.saveSceneFromTv(i) }) { vm.applyScene(sc) }
+                    }
+                }
+                val sceneSummary = scenes.joinToString("   ") { sc ->
+                    sc.name + ": " + listOfNotNull(
+                        sc.pictureMode?.let { label(PICTURE_MODES, it) }, sc.soundMode?.let { label(SOUND_MODES, it) },
+                        sc.soundOutput?.let { label(SOUND_OUTPUTS, it) }, sc.volume?.let { "vol $it" },
+                    ).joinToString(", ")
+                }
+                Text(sceneSummary, color = TextDim, fontSize = 11.sp)
+            }
+
+            if (hasLg) {
+            // ---- Sound (TV + LG soundbar over eARC) ----
+            Text("Sound output" + (soundOutput?.let { "  ·  ${label(SOUND_OUTPUTS, it)}" } ?: ""), color = TextDim, fontSize = 13.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                SOUND_OUTPUTS.forEach { (lbl, id) ->
+                    PillButton(lbl, modifier = Modifier.weight(1f), color = if (soundOutput == id) Accent else Surface2, contentColor = if (soundOutput == id) Bg else TextMain) { vm.setSoundOutput(id) }
+                }
+            }
+            Text("Sound mode (the soundbar follows it)" + (soundMode?.let { "  ·  ${label(SOUND_MODES, it)}" } ?: ""), color = TextDim, fontSize = 13.sp)
+            SOUND_MODES.chunked(3).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    row.forEach { (lbl, id) ->
+                        PillButton(lbl, modifier = Modifier.weight(1f), color = if (soundMode == id) Accent else Surface2, contentColor = if (soundMode == id) Bg else TextMain) { vm.setSoundMode(id) }
+                    }
+                }
+            }
+            Text("Volume" + (volume?.let { "  ·  $it" } ?: ""), color = TextDim, fontSize = 13.sp)
+            var vol by remember(volume) { mutableStateOf((volume ?: 10).toFloat()) }
+            Slider(
+                value = vol,
+                onValueChange = { vol = it },
+                onValueChangeFinished = { vm.setVolume(vol.toInt()) },
+                valueRange = 0f..100f,
+                enabled = connected,
+            )
+
+            }
 
             // ---- Sleep timer ----
             Text("Sleep timer (turns the TV off)", color = TextDim, fontSize = 13.sp)

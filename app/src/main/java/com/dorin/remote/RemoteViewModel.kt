@@ -47,6 +47,33 @@ val ATV_LINKS = mapOf(
 )
 
 /** Samsung remote keys that select an HDMI input (for "which HDMI is the Xiaomi on"). */
+/**
+ * A one-tap preset for the LG TV. Null fields are left as they are.
+ * pictureMode / soundMode are webOS ids, soundOutput is tv_speaker | external_arc | tv_speaker_external_arc.
+ */
+data class Scene(val name: String, val pictureMode: String? = null, val soundMode: String? = null, val soundOutput: String? = null, val volume: Int? = null) {
+    fun toJson(): org.json.JSONObject = org.json.JSONObject().put("name", name).put("pictureMode", pictureMode ?: org.json.JSONObject.NULL)
+        .put("soundMode", soundMode ?: org.json.JSONObject.NULL).put("soundOutput", soundOutput ?: org.json.JSONObject.NULL).put("volume", volume ?: org.json.JSONObject.NULL)
+    companion object {
+        fun fromJson(o: org.json.JSONObject) = Scene(
+            o.getString("name"),
+            o.optString("pictureMode").ifEmpty { null }.takeIf { !o.isNull("pictureMode") },
+            o.optString("soundMode").ifEmpty { null }.takeIf { !o.isNull("soundMode") },
+            o.optString("soundOutput").ifEmpty { null }.takeIf { !o.isNull("soundOutput") },
+            if (o.isNull("volume")) null else o.optInt("volume"),
+        )
+    }
+}
+
+val DEFAULT_SCENES = listOf(
+    // Everyday: plain stereo, TV speakers + soundbar.
+    Scene("Regular", pictureMode = "normal", soundMode = "standard", soundOutput = "tv_speaker_external_arc"),
+    // Film: cinema picture, Cinema sound (the soundbar spreads the mix to the rear speakers), soundbar only.
+    Scene("Movie", pictureMode = "cinema", soundMode = "movie", soundOutput = "external_arc"),
+    // Listening from the balcony: dialogue-first mode, every speaker on. Volume is left alone (the user nudges it with the slider).
+    Scene("Outside", soundMode = "news", soundOutput = "tv_speaker_external_arc"),
+)
+
 val SAMSUNG_HDMI_KEYS = listOf("KEY_HDMI1" to "HDMI 1", "KEY_HDMI2" to "HDMI 2", "KEY_HDMI3" to "HDMI 3", "KEY_HDMI4" to "HDMI 4")
 
 class RemoteViewModel(app: Application) : AndroidViewModel(app) {
@@ -96,6 +123,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val samsungApps = MutableStateFlow(loadSamsungAppsCache())
     /** Text recognised from the phone microphone, consumed by the keyboard bar. */
     val voiceText = MutableStateFlow<String?>(null)
+    val scenes = MutableStateFlow(loadScenes())
     // self-update via GitHub Releases
     val update = MutableStateFlow<com.dorin.remote.net.UpdateInfo?>(null)
     val updateProgress = MutableStateFlow<Float?>(null)
@@ -112,11 +140,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         connectAll()
-        viewModelScope.launch {
-            runCatching { com.dorin.remote.net.Updater.check(currentVersion) }
-                .onSuccess { update.value = it }
-                .onFailure { Log.w(tag, "update check failed: ${it.message}") }
-        }
+        checkUpdate()
         viewModelScope.launch {
             // If the device of the current tab is removed in setup, jump to the first remaining one.
             targets.collect { list -> if (target.value !in list) target.value = list.first() }
@@ -167,7 +191,25 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         if (prefs.atvIp.isNotEmpty() && prefs.atvPaired) atv.connect(prefs.atvIp) else atv.disconnect()
     }
 
+    private var lastUpdateCheck = 0L
+
+    /** Asks GitHub for the latest release, at most once every 10 minutes (runs on launch and on every return to the foreground). */
+    fun checkUpdate() {
+        val now = System.currentTimeMillis()
+        if (now - lastUpdateCheck < 10 * 60_000L) return
+        lastUpdateCheck = now
+        viewModelScope.launch {
+            runCatching { com.dorin.remote.net.Updater.check(currentVersion) }
+                .onSuccess { info ->
+                    if (info != null && info.version != update.value?.version) updateDismissed.value = false
+                    update.value = info
+                }
+                .onFailure { Log.w(tag, "update check failed: ${it.message}") }
+        }
+    }
+
     fun reconnect() {
+        checkUpdate()
         if (lg.state.value !is LgState.Connected && prefs.lgIp.isNotEmpty()) lg.connect(prefs.lgIp, prefs.lgKey)
         if (samsung.state.value !is SamsungState.Connected && prefs.samsungIp.isNotEmpty()) samsung.connect(prefs.samsungIp, prefs.samsungToken)
         if (atv.state.value !is AtvState.Connected && prefs.atvIp.isNotEmpty() && prefs.atvPaired) atv.connect(prefs.atvIp)
@@ -516,6 +558,56 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
                 .onFailure { say("Could not set picture mode: ${it.message}") }
         }
     }
+
+    fun setSoundMode(mode: String) {
+        viewModelScope.launch {
+            runCatching { lg.setSoundMode(mode) }.onFailure { say("Could not set sound mode: ${it.message}") }
+        }
+    }
+
+    fun setSoundOutput(output: String) {
+        viewModelScope.launch {
+            runCatching { lg.setSoundOutput(output) }.onFailure { say("Could not change sound output: ${it.message}") }
+        }
+    }
+
+    fun setVolume(level: Int) { if (lg.isConnected) lg.setVolume(level) else say("LG TV not connected") }
+
+    // ---------- scenes ----------
+
+    private fun loadScenes(): List<Scene> = runCatching {
+        val arr = org.json.JSONArray(prefs.scenes ?: return DEFAULT_SCENES)
+        (0 until arr.length()).map { Scene.fromJson(arr.getJSONObject(it)) }.ifEmpty { DEFAULT_SCENES }
+    }.getOrDefault(DEFAULT_SCENES)
+
+    private fun storeScenes(list: List<Scene>) {
+        scenes.value = list
+        prefs.scenes = org.json.JSONArray(list.map { it.toJson() }).toString()
+    }
+
+    /** Applies every field of the scene that is set, in a sensible order (output first, then modes, then volume). */
+    fun applyScene(scene: Scene) {
+        if (!lg.isConnected) { say("LG TV not connected"); return }
+        viewModelScope.launch {
+            val errors = mutableListOf<String>()
+            scene.soundOutput?.let { o -> if (o != lg.soundOutput.value) runCatching { lg.setSoundOutput(o); kotlinx.coroutines.delay(1500) }.onFailure { errors += "output" } }
+            scene.soundMode?.let { m -> runCatching { lg.setSoundMode(m) }.onFailure { errors += "sound mode" } }
+            scene.pictureMode?.let { m -> runCatching { lg.setPictureSetting("pictureMode", m) }.onFailure { errors += "picture mode" } }
+            scene.volume?.let { lg.setVolume(it) }
+            say(if (errors.isEmpty()) "${scene.name} applied" else "${scene.name}: could not set ${errors.joinToString()}")
+        }
+    }
+
+    /** Long-press on a scene: remember what the TV is doing right now under that name. */
+    fun saveSceneFromTv(index: Int) {
+        if (!lg.isConnected) { say("Connect to the LG TV first"); return }
+        val old = scenes.value.getOrNull(index) ?: return
+        val updated = old.copy(pictureMode = lg.pictureMode.value, soundMode = lg.soundMode.value, soundOutput = lg.soundOutput.value, volume = lg.volume.value)
+        storeScenes(scenes.value.toMutableList().also { it[index] = updated })
+        say("Saved current picture, sound and volume as \"${old.name}\"")
+    }
+
+    fun resetScenes() { storeScenes(DEFAULT_SCENES); say("Scenes reset") }
 
     fun screenOff() { lg.screenOff(); say("Screen off (sound stays on). Press any button to wake it.") }
 

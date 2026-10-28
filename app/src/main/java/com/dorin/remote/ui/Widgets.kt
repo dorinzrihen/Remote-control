@@ -4,6 +4,7 @@ import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -94,6 +95,8 @@ fun PillButton(
     color: Color = Surface2,
     contentColor: Color = TextMain,
     icon: ImageVector? = null,
+    /** When set, the button fires on release instead of press so a long press can be told apart. */
+    onLongPress: (() -> Unit)? = null,
     onPress: () -> Unit,
 ) {
     val view = LocalView.current
@@ -101,12 +104,20 @@ fun PillButton(
     Box(
         modifier = modifier
             .background(if (pressed) color.copy(alpha = 0.6f) else color, RoundedCornerShape(14.dp))
-            .pointerInput(onPress) {
-                awaitEachGesture {
-                    awaitFirstDown(); pressed = true
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    onPress()
-                    waitForUpOrCancellation(); pressed = false
+            .pointerInput(onPress, onLongPress) {
+                if (onLongPress == null) {
+                    awaitEachGesture {
+                        awaitFirstDown(); pressed = true
+                        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        onPress()
+                        waitForUpOrCancellation(); pressed = false
+                    }
+                } else {
+                    detectTapGestures(
+                        onPress = { pressed = true; tryAwaitRelease(); pressed = false },
+                        onTap = { view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); onPress() },
+                        onLongPress = { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); onLongPress() },
+                    )
                 }
             }
             .padding(PaddingValues(horizontal = 12.dp, vertical = 12.dp)),

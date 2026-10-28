@@ -22,7 +22,9 @@ After that the app checks GitHub Releases on every launch and offers to download
 - **Mic** button uses the phone's speech recognition and puts the words into the keyboard bar.
 - **Shortcut buttons** are chosen in Settings from the apps installed on the TV (LG and Samsung have separate lists), plus website buttons (Stremio web by default) that open in the TV browser.
 - **Volume / mute** always go to the TV, which forwards them to the soundbar over HDMI ARC.
-- **Quick actions** (lightning button): sleep timer (15/30/60/90 min, then the TV turns off), and on LG only: brightness slider, picture mode, screen off with sound on.
+- **Quick actions** (lightning button): sleep timer (15/30/60/90 min, then the TV turns off), and on LG only: scenes, brightness slider, picture mode, sound output, sound mode, volume slider, screen off with sound on.
+- **Scenes** (LG): one tap sets picture mode, sound mode, sound output and volume together. Defaults: *Regular* (Standard picture, Standard sound, TV + soundbar), *Movie* (Cinema picture, Cinema sound, soundbar only), *Outside* (Clear Voice, TV + soundbar, volume unchanged). Hold a scene to overwrite it with whatever the TV is doing right now.
+- **Sound** (LG + soundbar over HDMI eARC): sound output (TV + soundbar / soundbar only / TV speaker) and sound mode (AI Sound Pro, Standard, Cinema, Clear Voice, Sports, Music, Game, Bass Blast). With an LG soundbar the TV shares its sound mode with the bar, so these buttons change the soundbar's mode too. Rear-speaker level, woofer level and left/right balance live inside the soundbar and are not reachable through the TV; use the soundbar remote for those.
 - **TV power** turns the TV off, or wakes it with Wake-on-LAN (LG: needs "Quick Start+"; Samsung: needs "Power On with Mobile" / network standby). On Samsung the power key is a toggle.
 
 ## Samsung notes
@@ -36,7 +38,7 @@ After that the app checks GitHub Releases on every launch and offers to download
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ./gradlew assembleRelease
 cp app/build/outputs/apk/release/app-release.apk UniRemote.apk
-gh release create v1.3 UniRemote.apk --title "UniRemote 1.3" --notes "what changed"
+gh release create v1.4 UniRemote.apk --title "UniRemote 1.4" --notes "what changed"
 ```
 Bump `versionCode` / `versionName` in `app/build.gradle.kts` before each release; the in-app updater compares `versionName` with the release tag.
 Protocol unit tests (compared against the official Python protobuf library): `./gradlew testReleaseUnitTest`
