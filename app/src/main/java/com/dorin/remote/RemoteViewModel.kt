@@ -44,6 +44,7 @@ val ATV_LINKS = mapOf(
     "amazon" to "https://app.primevideo.com",
     "com.disney.disneyplus-prod" to "https://www.disneyplus.com",
     "spotify-beehive" to "https://open.spotify.com",
+    "io.strem.tv" to "https://web.stremio.com",
 )
 
 /** Samsung remote keys that select an HDMI input (for "which HDMI is the Xiaomi on"). */

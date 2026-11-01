@@ -64,4 +64,16 @@ class Prefs(ctx: Context) {
     var xiaomiInputId: String?
         get() = sp.getString("xiaomi_input", null)
         set(v) = sp.edit().putString("xiaomi_input", v).apply()
+
+    init {
+        // 1.4: the Stremio website button becomes a button for the Stremio TV app, which plays full screen by itself.
+        if (!sp.getBoolean("migrated_stremio_app", false)) {
+            val web = webShortcuts
+            if (web.any { "web.stremio.com" in it.second }) {
+                webShortcuts = web.filterNot { "web.stremio.com" in it.second }
+                if ("io.strem.tv" !in lgShortcuts) lgShortcuts = lgShortcuts + "io.strem.tv"
+            }
+            sp.edit().putBoolean("migrated_stremio_app", true).apply()
+        }
+    }
 }

@@ -64,9 +64,10 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.runtime.rememberUpdatedState
+import kotlinx.coroutines.delay
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -263,8 +264,15 @@ fun RemoteScreen(vm: RemoteViewModel) {
         val samsungShortcutIds by vm.samsungShortcutIds.collectAsState()
         val samsungApps by vm.samsungApps.collectAsState()
         val shortcuts = remember(target, lgShortcutIds, samsungShortcutIds, webShortcuts, lgApps, samsungApps) { vm.shortcutsFor(target) }
+        // Two taps launch: the first one arms the button, so a stray touch does nothing.
+        var armed by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(armed) { if (armed != null) { delay(2500); armed = null } }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            shortcuts.forEach { sc -> ShortcutButton(sc) { vm.launch(sc) } }
+            shortcuts.forEach { sc ->
+                ShortcutButton(sc, armed = armed == sc.iconKey, accent = accent) {
+                    if (armed == sc.iconKey) { armed = null; vm.launch(sc) } else armed = sc.iconKey
+                }
+            }
             if (shortcuts.isEmpty()) Text("Choose shortcuts in Settings", color = TextDim, fontSize = 12.sp)
         }
     }
@@ -347,7 +355,7 @@ private fun KeyboardBar(vm: RemoteViewModel, accent: Color, target: Target) {
 
 
 @Composable
-private fun ShortcutButton(sc: com.dorin.remote.Shortcut, onPress: () -> Unit) {
+private fun ShortcutButton(sc: com.dorin.remote.Shortcut, armed: Boolean, accent: Color, onTap: () -> Unit) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val view = androidx.compose.ui.platform.LocalView.current
     val iconVersion by com.dorin.remote.net.IconCache.version.collectAsState()
@@ -355,18 +363,19 @@ private fun ShortcutButton(sc: com.dorin.remote.Shortcut, onPress: () -> Unit) {
         value = com.dorin.remote.net.IconCache.get(ctx, sc.iconKey, sc.iconUrl)
     }
     var pressed by remember { mutableStateOf(false) }
+    val currentOnTap by rememberUpdatedState(onTap)
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
             .width(72.dp)
             .background(if (pressed) Surface2.copy(alpha = 0.6f) else Surface2, RoundedCornerShape(14.dp))
-            .pointerInput(onPress) {
-                awaitEachGesture {
-                    awaitFirstDown(); pressed = true
-                    view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
-                    onPress()
-                    waitForUpOrCancellation(); pressed = false
-                }
+            .border(2.dp, if (armed) accent else Color.Transparent, RoundedCornerShape(14.dp))
+            .pointerInput(Unit) {
+                // Fires on release, so swiping across the row scrolls it instead of tapping
+                detectTapGestures(
+                    onPress = { pressed = true; tryAwaitRelease(); pressed = false },
+                    onTap = { view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP); currentOnTap() },
+                )
             }
             .padding(vertical = 8.dp, horizontal = 4.dp),
     ) {
@@ -377,6 +386,6 @@ private fun ShortcutButton(sc: com.dorin.remote.Shortcut, onPress: () -> Unit) {
             else Text(sc.label.take(1).uppercase(), color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(4.dp))
-        Text(sc.label, color = TextMain, fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+        Text(if (armed) "Tap again" else sc.label, color = if (armed) accent else TextMain, fontSize = 11.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
     }
 }

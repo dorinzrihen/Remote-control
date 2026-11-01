@@ -90,8 +90,9 @@ fun Touchpad(
                         }
                         event.changes.forEach { it.consume() }
                     }
-                    val tapSlop = 12.dp.toPx()
-                    if (!twoFinger && moved < tapSlop && System.currentTimeMillis() - downTime < 350) {
+                    // Only a short, still touch clicks: small cursor nudges and the start of a drag must not.
+                    val tapSlop = 6.dp.toPx()
+                    if (!twoFinger && moved < tapSlop && System.currentTimeMillis() - downTime < 250) {
                         view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                         onClick()
                     }
