@@ -12,8 +12,8 @@ android {
         applicationId = "com.dorin.uniremote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 6
+        versionName = "1.5"
     }
 
     // The signing keystore is not committed to git. Without it, release builds fall back to the debug key.

@@ -57,10 +57,14 @@ class Prefs(ctx: Context) {
         get() = (sp.getString("web_shortcuts", null) ?: "Stremio|https://web.stremio.com")
             .split("\n").filter { it.contains("|") }.map { it.substringBefore("|") to it.substringAfter("|") }
         set(v) = sp.edit().putString("web_shortcuts", v.joinToString("\n") { "${it.first}|${it.second}" }).apply()
-    /** JSON array of scene presets (see Scene in RemoteViewModel); null = defaults. */
-    var scenes: String?
-        get() = sp.getString("scenes", null)
-        set(v) = sp.edit().putString("scenes", v).apply()
+    /** JSON array of saved WiZ bulbs: {mac, ip, room}. */
+    var bulbs: String?
+        get() = sp.getString("bulbs", null)
+        set(v) = sp.edit().putString("bulbs", v).apply()
+    /** At 21:00 switch the bulbs that are on to Night. */
+    var autoNight: Boolean
+        get() = sp.getBoolean("auto_night", true)
+        set(v) = sp.edit().putBoolean("auto_night", v).apply()
     var xiaomiInputId: String?
         get() = sp.getString("xiaomi_input", null)
         set(v) = sp.edit().putString("xiaomi_input", v).apply()

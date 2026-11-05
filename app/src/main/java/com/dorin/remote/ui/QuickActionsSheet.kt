@@ -64,7 +64,6 @@ fun QuickActionsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     val soundMode by vm.lg.soundMode.collectAsState()
     val soundOutput by vm.lg.soundOutput.collectAsState()
     val volume by vm.lg.volume.collectAsState()
-    val scenes by vm.scenes.collectAsState()
     val sleepEnd by vm.sleepEnd.collectAsState()
     val connected = lgState is LgState.Connected
     val hasLg = vm.prefs.lgIp.isNotEmpty()
@@ -86,22 +85,9 @@ fun QuickActionsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Quick actions", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold)
 
-            // ---- Scenes (LG only) ----
-            if (hasLg) {
-                Text("Scenes  ·  tap to apply, hold to save the TV's current picture, sound and volume", color = TextDim, fontSize = 13.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    scenes.forEachIndexed { i, sc ->
-                        PillButton(sc.name, modifier = Modifier.weight(1f), color = Accent, contentColor = Bg,
-                            onLongPress = { vm.saveSceneFromTv(i) }) { vm.applyScene(sc) }
-                    }
-                }
-                val sceneSummary = scenes.joinToString("   ") { sc ->
-                    sc.name + ": " + listOfNotNull(
-                        sc.pictureMode?.let { label(PICTURE_MODES, it) }, sc.soundMode?.let { label(SOUND_MODES, it) },
-                        sc.soundOutput?.let { label(SOUND_OUTPUTS, it) }, sc.volume?.let { "vol $it" },
-                    ).joinToString(", ")
-                }
-                Text(sceneSummary, color = TextDim, fontSize = 11.sp)
+            // ---- WiZ bulbs ----
+            PillButton("Bulbs", modifier = Modifier.fillMaxWidth(), color = BulbOn, contentColor = Bg) {
+                onDismiss(); vm.showBulbs.value = true
             }
 
             if (hasLg) {

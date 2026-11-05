@@ -279,6 +279,8 @@ fun RemoteScreen(vm: RemoteViewModel) {
 
     val showQuick by vm.showQuick.collectAsState()
     if (showQuick) QuickActionsSheet(vm) { vm.showQuick.value = false }
+    val showBulbs by vm.showBulbs.collectAsState()
+    if (showBulbs) BulbsSheet(vm) { vm.showBulbs.value = false }
     val showYouTube by vm.showYouTube.collectAsState()
     if (showYouTube) YouTubeSheet(vm) { vm.showYouTube.value = false }
 }

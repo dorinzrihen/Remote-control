@@ -14,6 +14,8 @@ import com.dorin.remote.tizen.SamsungApp
 import com.dorin.remote.tizen.SamsungClient
 import com.dorin.remote.tizen.SamsungState
 import com.dorin.remote.webos.LgState
+import com.dorin.remote.wiz.LightMode
+import com.dorin.remote.wiz.Pilot
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -48,33 +50,6 @@ val ATV_LINKS = mapOf(
 )
 
 /** Samsung remote keys that select an HDMI input (for "which HDMI is the Xiaomi on"). */
-/**
- * A one-tap preset for the LG TV. Null fields are left as they are.
- * pictureMode / soundMode are webOS ids, soundOutput is tv_speaker | external_arc | tv_speaker_external_arc.
- */
-data class Scene(val name: String, val pictureMode: String? = null, val soundMode: String? = null, val soundOutput: String? = null, val volume: Int? = null) {
-    fun toJson(): org.json.JSONObject = org.json.JSONObject().put("name", name).put("pictureMode", pictureMode ?: org.json.JSONObject.NULL)
-        .put("soundMode", soundMode ?: org.json.JSONObject.NULL).put("soundOutput", soundOutput ?: org.json.JSONObject.NULL).put("volume", volume ?: org.json.JSONObject.NULL)
-    companion object {
-        fun fromJson(o: org.json.JSONObject) = Scene(
-            o.getString("name"),
-            o.optString("pictureMode").ifEmpty { null }.takeIf { !o.isNull("pictureMode") },
-            o.optString("soundMode").ifEmpty { null }.takeIf { !o.isNull("soundMode") },
-            o.optString("soundOutput").ifEmpty { null }.takeIf { !o.isNull("soundOutput") },
-            if (o.isNull("volume")) null else o.optInt("volume"),
-        )
-    }
-}
-
-val DEFAULT_SCENES = listOf(
-    // Everyday: plain stereo, TV speakers + soundbar.
-    Scene("Regular", pictureMode = "normal", soundMode = "standard", soundOutput = "tv_speaker_external_arc"),
-    // Film: cinema picture, Cinema sound (the soundbar spreads the mix to the rear speakers), soundbar only.
-    Scene("Movie", pictureMode = "cinema", soundMode = "movie", soundOutput = "external_arc"),
-    // Listening from the balcony: dialogue-first mode, every speaker on. Volume is left alone (the user nudges it with the slider).
-    Scene("Outside", soundMode = "news", soundOutput = "tv_speaker_external_arc"),
-)
-
 val SAMSUNG_HDMI_KEYS = listOf("KEY_HDMI1" to "HDMI 1", "KEY_HDMI2" to "HDMI 2", "KEY_HDMI3" to "HDMI 3", "KEY_HDMI4" to "HDMI 4")
 
 class RemoteViewModel(app: Application) : AndroidViewModel(app) {
@@ -124,7 +99,13 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val samsungApps = MutableStateFlow(loadSamsungAppsCache())
     /** Text recognised from the phone microphone, consumed by the keyboard bar. */
     val voiceText = MutableStateFlow<String?>(null)
-    val scenes = MutableStateFlow(loadScenes())
+    // WiZ bulbs
+    val lights = application.lights
+    val showBulbs = MutableStateFlow(false)
+    val autoNight = MutableStateFlow(prefs.autoNight)
+    /** Bulbs that answered the last search and are not saved yet: ip -> state. */
+    val newBulbs = MutableStateFlow<Map<String, Pilot>>(emptyMap())
+    val bulbSearching = MutableStateFlow(false)
     // self-update via GitHub Releases
     val update = MutableStateFlow<com.dorin.remote.net.UpdateInfo?>(null)
     val updateProgress = MutableStateFlow<Float?>(null)
@@ -574,41 +555,47 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setVolume(level: Int) { if (lg.isConnected) lg.setVolume(level) else say("LG TV not connected") }
 
-    // ---------- scenes ----------
+    // ---------- WiZ bulbs ----------
 
-    private fun loadScenes(): List<Scene> = runCatching {
-        val arr = org.json.JSONArray(prefs.scenes ?: return DEFAULT_SCENES)
-        (0 until arr.length()).map { Scene.fromJson(arr.getJSONObject(it)) }.ifEmpty { DEFAULT_SCENES }
-    }.getOrDefault(DEFAULT_SCENES)
+    fun refreshBulbs() { viewModelScope.launch { lights.refresh() } }
 
-    private fun storeScenes(list: List<Scene>) {
-        scenes.value = list
-        prefs.scenes = org.json.JSONArray(list.map { it.toJson() }).toString()
-    }
-
-    /** Applies every field of the scene that is set, in a sensible order (output first, then modes, then volume). */
-    fun applyScene(scene: Scene) {
-        if (!lg.isConnected) { say("LG TV not connected"); return }
+    /** A null mode turns the room off. */
+    fun setRoom(room: String, mode: LightMode?) {
         viewModelScope.launch {
-            val errors = mutableListOf<String>()
-            scene.soundOutput?.let { o -> if (o != lg.soundOutput.value) runCatching { lg.setSoundOutput(o); kotlinx.coroutines.delay(1500) }.onFailure { errors += "output" } }
-            scene.soundMode?.let { m -> runCatching { lg.setSoundMode(m) }.onFailure { errors += "sound mode" } }
-            scene.pictureMode?.let { m -> runCatching { lg.setPictureSetting("pictureMode", m) }.onFailure { errors += "picture mode" } }
-            scene.volume?.let { lg.setVolume(it) }
-            say(if (errors.isEmpty()) "${scene.name} applied" else "${scene.name}: could not set ${errors.joinToString()}")
+            val total = lights.bulbs.value.count { it.room == room }
+            val ok = lights.setRoom(room, mode)
+            if (ok == 0) say("$room: bulbs not reachable. Is the phone on the home Wi-Fi and the wall switch on?")
+            else if (ok < total) say("$room: ${total - ok} of $total bulbs did not answer")
         }
     }
 
-    /** Long-press on a scene: remember what the TV is doing right now under that name. */
-    fun saveSceneFromTv(index: Int) {
-        if (!lg.isConnected) { say("Connect to the LG TV first"); return }
-        val old = scenes.value.getOrNull(index) ?: return
-        val updated = old.copy(pictureMode = lg.pictureMode.value, soundMode = lg.soundMode.value, soundOutput = lg.soundOutput.value, volume = lg.volume.value)
-        storeScenes(scenes.value.toMutableList().also { it[index] = updated })
-        say("Saved current picture, sound and volume as \"${old.name}\"")
+    /** The on/off button of a room: off when a bulb is on, otherwise on in Regular, or in Night between 21:00 and 06:00. */
+    fun toggleRoom(room: String) {
+        val anyOn = lights.bulbs.value.any { it.room == room && lights.pilots.value[it.mac]?.on == true }
+        setRoom(room, if (anyOn) null else if (NightTime.isNightNow()) LightMode.NIGHT else LightMode.REGULAR)
     }
 
-    fun resetScenes() { storeScenes(DEFAULT_SCENES); say("Scenes reset") }
+    fun findBulbs() {
+        viewModelScope.launch {
+            bulbSearching.value = true
+            try {
+                val saved = lights.bulbs.value.map { it.mac }.toSet()
+                newBulbs.value = lights.discover().filterValues { it.mac !in saved }
+                if (newBulbs.value.isEmpty()) say(if (saved.isEmpty()) "No bulbs found. Finish the setup in the WiZ app first." else "No new bulbs found")
+            } finally { bulbSearching.value = false }
+        }
+    }
+
+    fun addBulb(ip: String, pilot: Pilot, room: String) {
+        lights.add(pilot.mac, ip, room.trim().ifEmpty { "Living room" })
+        newBulbs.value = newBulbs.value - ip
+        NightLightsReceiver.schedule(getApplication())
+        refreshBulbs()
+    }
+
+    fun removeBulb(mac: String) { lights.remove(mac); NightLightsReceiver.schedule(getApplication()) }
+    fun blinkBulb(ip: String) { viewModelScope.launch { lights.blink(ip) } }
+    fun setAutoNight(v: Boolean) { prefs.autoNight = v; autoNight.value = v; NightLightsReceiver.schedule(getApplication()) }
 
     fun screenOff() { lg.screenOff(); say("Screen off (sound stays on). Press any button to wake it.") }
 
