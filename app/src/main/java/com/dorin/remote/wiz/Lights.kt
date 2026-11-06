@@ -18,6 +18,7 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
     val config = MutableStateFlow<JSONObject?>(null)
     val error = MutableStateFlow<String?>(null)
     val loaded = MutableStateFlow(false)
+    val roomControls = MutableStateFlow<Map<String, RoomControlState>>(emptyMap())
 
     /** Only selected manager responses replace these views. No prefs.bulbs bootstrap. */
     fun acceptStatus(status: JSONObject) {
@@ -49,6 +50,14 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
             }
         }.toMap()
         config.value = settings
+        val holds = status.optJSONObject("holds")?.let { values ->
+            values.keys().asSequence().associate { it.lowercase() to values.optDouble(it, Double.NaN) }
+        }
+        roomControls.value = saved.groupBy { it.room }.mapValues { (_, roomBulbs) ->
+            roomControlState(roomBulbs.map { it.mac }, pilots.value, true,
+                if (settings.has("enabled")) settings.getBoolean("enabled") else null,
+                holds, if (status.has("statusAt")) status.optDouble("statusAt", Double.NaN) else null)
+        }
         val reported = errors.keys().asSequence().map { "…${it.takeLast(4)}: ${errors.getString(it)}" }.toList()
         val stale = saved.filter { states.has(it.mac) && (observationAges.value[it.mac] ?: Int.MAX_VALUE) > maximumAge }
             .map { "…${it.mac.takeLast(4)}: manager observation stale / age unknown" }
@@ -59,6 +68,9 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
     fun unavailable(message: String) {
         loaded.value = false
         pilots.value = emptyMap()
+        roomControls.value = bulbs.value.map { it.room }.distinct().associateWith {
+            RoomControlState(status = "manager unavailable / status unknown")
+        }
         error.value = "Manager unavailable: $message. No direct bulb command was sent."
     }
 

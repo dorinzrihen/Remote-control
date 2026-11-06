@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -30,11 +32,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dorin.remote.RemoteViewModel
 import com.dorin.remote.wiz.LightMode
+import com.dorin.remote.wiz.RoomControlChoice
 import kotlinx.coroutines.delay
 
 val BulbOn = Color(0xFFE0AF68)
@@ -51,6 +55,7 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     val loaded by vm.lights.loaded.collectAsState()
     val error by vm.lights.error.collectAsState()
     val observationAges by vm.lights.observationAges.collectAsState()
+    val roomControls by vm.lights.roomControls.collectAsState()
     var manageBulbs by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -71,13 +76,8 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
                 val inRoom = bulbs.filter { it.room == room }
                 val states = inRoom.mapNotNull { pilots[it.mac] }
                 val on = states.any { it.on }
-                val mode = states.firstOrNull { it.on }?.let(LightMode::of)
-                val status = when {
-                    !loaded -> "manager unavailable / status unknown"
-                    states.size < inRoom.size -> "${inRoom.size - states.size} unreachable / status unknown"
-                    !on -> "off"
-                    else -> mode?.label ?: "on"
-                }
+                val control = roomControls[room]
+                val status = control?.status ?: "status unknown"
                 Column(Modifier.fillMaxWidth().background(Surface2, RoundedCornerShape(14.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -87,14 +87,22 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
                         RemoteButton(icon = Icons.Default.PowerSettingsNew, label = "$room on / off", size = 44.dp,
                             color = if (on) BulbOn else Bg, contentColor = if (on) Bg else TextMain) { vm.toggleRoom(room) }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        LightMode.entries.forEach { m ->
-                            PillButton(m.label, modifier = Modifier.weight(1f), color = if (mode == m) BulbOn else Bg, contentColor = if (mode == m) Bg else TextMain) {
-                                vm.setRoom(room, m)
+                    Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            LightMode.entries.forEach { m ->
+                                val selected = control?.selected == if (m == LightMode.REGULAR) RoomControlChoice.REGULAR else RoomControlChoice.NIGHT
+                                val action = { vm.setRoom(room, m) }
+                                PillButton(m.label, modifier = Modifier.weight(1f).selectable(selected, role = Role.RadioButton, onClick = action),
+                                    color = if (selected) BulbOn else Bg, contentColor = if (selected) Bg else TextMain, onPress = action)
                             }
                         }
+                        if (butlerEnabled) {
+                            val selected = control?.selected == RoomControlChoice.FOLLOW
+                            val action = { vm.followTimetable(room) }
+                            PillButton("Follow timetable", modifier = Modifier.fillMaxWidth().selectable(selected, role = Role.RadioButton, onClick = action),
+                                color = if (selected) BulbOn else Bg, contentColor = if (selected) Bg else TextMain, onPress = action)
+                        }
                     }
-                    if (butlerEnabled) PillButton("Follow timetable", modifier = Modifier.fillMaxWidth()) { vm.followTimetable(room) }
                 }
             }
             ButlerSettings(vm)
