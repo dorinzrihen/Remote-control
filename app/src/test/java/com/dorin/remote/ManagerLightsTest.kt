@@ -209,13 +209,17 @@ class ManagerLightsTest {
         assertFalse(lights.loaded.value)
     }
 
+    // A literal address, like the real manager's. After a dropped connection OkHttp moves on to
+    // the next address, and "localhost" can also resolve to ::1, where this server isn't listening.
+    private val loopback = java.net.InetAddress.getByName("127.0.0.1")
+
     @Test fun readOnlyStatusRecoversFromDisconnectedConnection() = runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
         server.enqueue(MockResponse().setBody(status().toString()))
-        server.start()
+        server.start(loopback, 0)
         try {
-            val result = ButlerClient.exchange(server.url("/").toString(), "/v1/status")
+            val result = ButlerClient.exchange("http://127.0.0.1:${server.port}/", "/v1/status")
             assertTrue(result.has("config"))
             assertEquals(2, server.requestCount)
             repeat(2) {
@@ -229,10 +233,10 @@ class ManagerLightsTest {
     @Test fun readOnlyStatusRecoveryIsBounded() = runBlocking {
         val server = MockWebServer()
         repeat(2) { server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST)) }
-        server.start()
+        server.start(loopback, 0)
         try {
             try {
-                ButlerClient.exchange(server.url("/").toString(), "/v1/status")
+                ButlerClient.exchange("http://127.0.0.1:${server.port}/", "/v1/status")
                 fail("Expected unavailable status after two attempts")
             } catch (_: java.io.IOException) { }
             assertEquals(2, server.requestCount)
