@@ -18,6 +18,7 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
     val config = MutableStateFlow<JSONObject?>(null)
     val error = MutableStateFlow<String?>(null)
     val loaded = MutableStateFlow(false)
+    val managerConnection = ManagerConnectionStatus()
     val roomControls = MutableStateFlow<Map<String, RoomControlState>>(emptyMap())
 
     /** Only selected manager responses replace these views. No prefs.bulbs bootstrap. */
@@ -63,9 +64,11 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
             .map { "…${it.mac.takeLast(4)}: manager observation stale / age unknown" }
         error.value = (reported + stale).takeIf { it.isNotEmpty() }?.joinToString("; ")
         loaded.value = true
+        managerConnection.connected()
     }
 
     fun unavailable(message: String) {
+        managerConnection.unavailable()
         loaded.value = false
         pilots.value = emptyMap()
         roomControls.value = bulbs.value.map { it.room }.distinct().associateWith {

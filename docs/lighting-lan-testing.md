@@ -11,6 +11,13 @@ connected. Unconfirmed requests do not claim that the manager is down or that
 the command was never applied. Regression tests simulate these cases without
 sending real light commands.
 
+The small dot next to **Bulbs** is green only after a fresh successful manager
+status response. It is grey on opening/checking, after a failed request, or when
+the last success is over five seconds old. Individual bulb errors and timetable
+enabled/disabled state do not change it. Its accessibility label describes the
+connection state. The indicator's emulator UI test uses controlled HTTP-client
+responses, including failure, without touching a real manager or saved settings.
+
 Run fake-bulb/HTTP tests (no hardware writes):
 
 ```sh

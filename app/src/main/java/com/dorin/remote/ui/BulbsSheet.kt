@@ -2,14 +2,17 @@ package com.dorin.remote.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
@@ -22,26 +25,38 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dorin.remote.RemoteViewModel
 import com.dorin.remote.wiz.LightMode
 import com.dorin.remote.wiz.RoomControlChoice
+import com.dorin.remote.wiz.ManagerConnection
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 val BulbOn = Color(0xFFE0AF68)
+
+@Composable
+fun ManagerConnectionIndicator(connection: ManagerConnection) {
+    Box(Modifier.size(8.dp)
+        .background(if (connection == ManagerConnection.CONNECTED) AccentAtv else TextDim, CircleShape)
+        .semantics { contentDescription = connection.description })
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,17 +72,30 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     val observationAges by vm.lights.observationAges.collectAsState()
     val roomControls by vm.lights.roomControls.collectAsState()
     var manageBulbs by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            vm.pollBulbs()
-            delay(1_000)
+    val managerConnection by produceState(ManagerConnection.CHECKING, vm.lights) {
+        vm.lights.managerConnection.checking()
+        coroutineScope {
+            launch {
+                while (true) {
+                    vm.pollBulbs()
+                    delay(1_000)
+                }
+            }
+            // Separate from HTTP polling: a stalled request must not leave a stale green dot.
+            while (true) {
+                value = vm.lights.managerConnection.current()
+                delay(250)
+            }
         }
     }
 
     // Opens fully so the buttons at the bottom are not hidden under the navigation bar.
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Surface1, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Bulbs", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Bulbs", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                ManagerConnectionIndicator(managerConnection)
+            }
             error?.let { Text(it, color = Danger, fontSize = 12.sp) }
             if (loaded && bulbs.isEmpty()) Text("No bulbs yet. Tap Manage bulbs to add one.", color = TextDim, fontSize = 13.sp)
 

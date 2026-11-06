@@ -608,7 +608,10 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             adoptManager(manager.url, result, manager.name)
             butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
         } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-        catch (e: Exception) { butlerStatus.value = "Could not connect: ${e.message}" }
+        catch (e: Exception) {
+            lights.unavailable(e.message ?: "Connection failed")
+            butlerStatus.value = "Could not connect: ${e.message}"
+        }
         finally { butlerBusy.value = false }
     }
 

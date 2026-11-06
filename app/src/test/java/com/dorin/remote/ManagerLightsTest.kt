@@ -5,6 +5,7 @@ import com.dorin.remote.wiz.LightMode
 import com.dorin.remote.wiz.Lights
 import com.dorin.remote.wiz.BulbsDidNotAnswer
 import com.dorin.remote.wiz.lightingCommandFailure
+import com.dorin.remote.wiz.ManagerConnection
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -62,6 +63,7 @@ class ManagerLightsTest {
         assertTrue(lights.pilots.value.isEmpty())
         assertTrue(lights.systemConfigs.value.isEmpty())
         assertTrue(lights.error.value!!.contains("MAC mismatch"))
+        assertEquals(ManagerConnection.CONNECTED, lights.managerConnection.current())
     }
 
     @Test fun staleManagerObservationsAreNotPresentedAsCurrentOnState() {
@@ -134,6 +136,7 @@ class ManagerLightsTest {
         lights.acceptStatus(status())
         try { lights.refresh(); fail("Expected offline error") } catch (_: IllegalStateException) { }
         assertFalse(lights.loaded.value)
+        assertEquals(ManagerConnection.UNAVAILABLE, lights.managerConnection.current())
         assertTrue(lights.pilots.value.isEmpty())
         assertEquals(1, lights.bulbs.value.size) // last manager list, explicitly status unknown
         assertTrue(lights.error.value!!.contains("No direct bulb command"))
@@ -165,6 +168,7 @@ class ManagerLightsTest {
         assertTrue(lights.loaded.value)
         assertTrue(lights.pilots.value.isEmpty())
         assertTrue(lights.error.value!!.contains("MAC mismatch"))
+        assertEquals(ManagerConnection.CONNECTED, lights.managerConnection.current())
     }
 
     @Test fun unconfirmedCommandDoesNotClaimTheManagerIsDownOrThatNothingWasSent() {
