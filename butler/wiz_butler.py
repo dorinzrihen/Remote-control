@@ -468,7 +468,12 @@ def handler(butler, token, pairing=None):
                     nonce = value.get("nonce", "")
                     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{64}", nonce):
                         raise ValueError("Invalid nonce")
-                    proof = hmac.new(token.encode(), ("uniremote-manager-v1:" + nonce).encode(), hashlib.sha256).hexdigest()
+                    # Bind the proof to the actual listening endpoint, not a
+                    # caller-supplied Host header. A fake discovered service
+                    # cannot just relay a nonce to the real manager elsewhere.
+                    address, port = self.connection.getsockname()[:2]
+                    message = f"uniremote-manager-v1:{nonce}:{address}:{port}"
+                    proof = hmac.new(token.encode(), message.encode(), hashlib.sha256).hexdigest()
                     self.respond(200, {"proof": proof})
                 elif self.path == "/v1/pair":
                     if pairing is not None and pairing.redeem(value.get("code")):

@@ -120,7 +120,8 @@ class PairingTest(unittest.TestCase):
         self.assertEqual((200, {"token": token}), post("/v1/pair", {"code": code}))
         self.assertEqual(403, post("/v1/pair", {"code": code})[0])
         nonce = "ab" * 32
-        expected = hmac.new(token.encode(), ("uniremote-manager-v1:" + nonce).encode(), hashlib.sha256).hexdigest()
+        address, port = server.server_address
+        expected = hmac.new(token.encode(), f"uniremote-manager-v1:{nonce}:{address}:{port}".encode(), hashlib.sha256).hexdigest()
         self.assertEqual((200, {"proof": expected}), post("/v1/identity", {"nonce": nonce}))
         self.assertEqual(400, post("/v1/identity", {"nonce": "bad"})[0])
         self.assertEqual(401, post("/v1/room", {"mode": "ON"})[0])

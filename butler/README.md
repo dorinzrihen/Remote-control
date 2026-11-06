@@ -109,7 +109,8 @@ Control/status endpoints require `Authorization: Bearer <token>`; POST bodies ar
 Two onboarding endpoints are unauthenticated and cannot control bulbs:
 `POST /v1/pair` accepts `{code}` only during explicit local activation and returns
 `{token}` once; `POST /v1/identity` accepts a random 64-hex-character `{nonce}` and
-returns `{proof}` (HMAC-SHA256 of `uniremote-manager-v1:<nonce>` using the token).
+returns `{proof}` (HMAC-SHA256 of `uniremote-manager-v1:<nonce>:<bound-IP>:<port>`
+using the token). The address/port come from the accepted socket, not the Host header.
 Identity verification prevents blindly sending saved secrets to arbitrary mDNS
 advertisements. Every response has `Cache-Control: no-store`.
 

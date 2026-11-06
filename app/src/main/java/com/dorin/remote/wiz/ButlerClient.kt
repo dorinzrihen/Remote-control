@@ -65,9 +65,10 @@ object ButlerClient {
     /** Never send a saved credential to a new address just because mDNS advertised it. */
     suspend fun verifyManager(url: String, token: String): Boolean {
         validateConnection(url, token)
+        val endpoint = url.trim().trimEnd('/').toHttpUrl()
         val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
         val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(token.toByteArray(), "HmacSHA256")) }
-        val expected = mac.doFinal("uniremote-manager-v1:$nonce".toByteArray()).joinToString("") { "%02x".format(it) }
+        val expected = mac.doFinal("uniremote-manager-v1:$nonce:${endpoint.host}:${endpoint.port}".toByteArray()).joinToString("") { "%02x".format(it) }
         val proof = publicPost(url, "/v1/identity", JSONObject().put("nonce", nonce)).optString("proof")
         return MessageDigest.isEqual(expected.toByteArray(), proof.toByteArray())
     }

@@ -59,7 +59,8 @@ class ButlerDiscoveryTest {
                     val nonce = JSONObject(body).getString("nonce")
                     assertEquals(64, nonce.length)
                     val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(token.toByteArray(), "HmacSHA256")) }
-                    val proof = mac.doFinal("uniremote-manager-v1:$nonce".toByteArray()).joinToString("") { "%02x".format(it) }
+                    val endpoint = server.url("/")
+                    val proof = mac.doFinal("uniremote-manager-v1:$nonce:${endpoint.host}:${endpoint.port}".toByteArray()).joinToString("") { "%02x".format(it) }
                     return MockResponse().setBody(JSONObject().put("proof", proof).toString())
                 }
             }
@@ -67,6 +68,17 @@ class ButlerDiscoveryTest {
             server.takeRequest()
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest) = MockResponse().setBody("{\"proof\":\"wrong\"}")
+            }
+            assertFalse(ButlerClient.verifyManager(server.url("/").toString(), token))
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val nonce = JSONObject(request.body.readUtf8()).getString("nonce")
+                    val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(token.toByteArray(), "HmacSHA256")) }
+                    // A valid manager proof relayed from another IP/port must
+                    // not authorize sending credentials to this service.
+                    val proof = mac.doFinal("uniremote-manager-v1:$nonce:10.100.102.19:8788".toByteArray()).joinToString("") { "%02x".format(it) }
+                    return MockResponse().setBody(JSONObject().put("proof", proof).toString())
+                }
             }
             assertFalse(ButlerClient.verifyManager(server.url("/").toString(), token))
         }
