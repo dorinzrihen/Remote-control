@@ -14,6 +14,7 @@ android {
         targetSdk = 35
         versionCode = 8
         versionName = "1.7"
+        manifestPlaceholders["appLabel"] = "UniRemote"
     }
 
     // The signing keystore is not committed to git. Without it, release builds fall back to the debug key.
@@ -30,6 +31,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".preview"
+            versionNameSuffix = "-preview"
+            manifestPlaceholders["appLabel"] = "UniRemote Preview"
+        }
         release {
             isMinifyEnabled = false
             isDebuggable = project.hasProperty("debuggable")
@@ -42,7 +48,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     packaging {
         resources.excludes += setOf("META-INF/versions/9/OSGI-INF/MANIFEST.MF", "META-INF/*.kotlin_module")
     }

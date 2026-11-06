@@ -13,7 +13,7 @@
 
     <application
         android:name=".App"
-        android:label="UniRemote"
+        android:label="${appLabel}"
         android:icon="@drawable/ic_launcher"
         android:theme="@style/Theme.UniRemote"
         android:usesCleartextTraffic="true"

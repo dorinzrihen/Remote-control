@@ -108,7 +108,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val butlerEnabled = MutableStateFlow(prefs.butlerEnabled)
     val butlerBusy = MutableStateFlow(false)
     val butlerSettings = MutableStateFlow<org.json.JSONObject?>(null)
-    val butlerStatus = MutableStateFlow("Searching for your butler…")
+    val butlerStatus = MutableStateFlow("Not connected")
     val foundButlers = MutableStateFlow<List<FoundButler>>(emptyList())
     val selectedButlerUrl = MutableStateFlow("")
     val butlerDiscoveryStatus = MutableStateFlow("Searching on Wi-Fi…")
@@ -188,6 +188,8 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Asks GitHub for the latest release, at most once every 10 minutes (runs on launch and on every return to the foreground). */
     fun checkUpdate() {
+        // Preview is a separate installation, never replaced by a public APK.
+        if (BuildConfig.DEBUG) return
         val now = System.currentTimeMillis()
         if (now - lastUpdateCheck < 10 * 60_000L) return
         lastUpdateCheck = now

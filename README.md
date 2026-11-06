@@ -41,3 +41,7 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ```
 To release: GitHub → **Actions** → **Release** → **Run workflow**. It bumps the version, builds, signs and publishes; phones get the update on next launch. See the [release guide](docs/releases.md).
 Protocol unit tests (compared against the official Python protobuf library): `./gradlew testReleaseUnitTest`
+
+To review before publishing, build the separate **UniRemote Preview** app with
+`./gradlew assembleDebug`. It installs beside the normal app without replacing it.
+See [phone testing and emulator screenshots](docs/testing.md).
