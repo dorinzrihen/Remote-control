@@ -6,8 +6,14 @@
     <string>com.uniremote.wiz</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/sh</string>
-        <string>/Users/YOU/repos/Remote-control/butler/run-butler.sh</string>
+        <string>/usr/bin/open</string>
+        <string>-W</string>
+        <string>-g</string>
+        <string>/Users/YOU/Applications/Butler Lights.app</string>
+    </array>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.uniremote.lights</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -16,8 +22,8 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/YOU/Library/Logs/uniremote-wiz.log</string>
+    <string>/Users/YOU/Library/Logs/com.uniremote.wiz-launcher.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOU/Library/Logs/uniremote-wiz.log</string>
+    <string>/Users/YOU/Library/Logs/com.uniremote.wiz-launcher.log</string>
 </dict>
 </plist>

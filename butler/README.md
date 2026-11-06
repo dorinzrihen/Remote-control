@@ -105,20 +105,49 @@ old client's identical list is not adopted. Add/remove use the dedicated endpoin
 
 For macOS, create `~/.config/uniremote-wiz.env` from
 `uniremote-wiz.env.example` (0600), setting the token, LAN IP/broadcast and absolute
-Python 3.11+ path. First run `sh /absolute/path/to/butler/run-butler.sh` in a terminal.
-Edit every `/Users/YOU/...` path in `com.uniremote.wiz.plist.example`, then copy it
-to `~/Library/LaunchAgents/com.uniremote.wiz.plist`:
+Python 3.11+ path. With Apple's Command Line Tools installed, run:
 
 ```sh
-launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.uniremote.wiz.plist"
-# Stop before updating Python files, then bootstrap again:
+python3 butler/macos/install_launcher.py --install
+```
+
+This builds a small native **Butler Lights.app** in `~/Applications`, backs up
+and replaces the existing manager login job, and opens the app through macOS.
+**On the Mac, choose Allow when Butler Lights asks for Local Network access.**
+The Python manager remains the bulb controller; the app only launches/supervises
+it and provides a named permission identity. No Apple Account, App Store login,
+administrator privileges, privacy bypass or new Python dependency is required.
+
+Why the app: macOS 15 can automatically allow LAN access from SSH/Terminal while
+blocking the same Python program as a login background job. Thus a successful
+SSH bulb query does not prove the background manager has permission. The app
+includes a network-usage description; the login job associates itself with the
+app. If denied, use **System Settings → Privacy & Security → Local Network**.
+Verify real observations through `/v1/status`, not just HTTP service health.
+
+The locally built app is ad-hoc signed, not Apple-issued Developer ID signed.
+Keep this tested app artifact: the installer reuses it rather than recompiling
+it on every manager update, preserving its executable identity. Rebuilding or
+moving it may require permission validation again. This is a local installation,
+not a promise of notarized distribution or identical behavior on every macOS.
+
+The matching plist template is `com.uniremote.wiz.plist.example`; its paths must
+be absolute. To stop the login job:
+
+```sh
 launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.uniremote.wiz.plist"
 ```
+
+Unload the job **and quit Butler Lights.app** before updating a running manager:
+unloading the `open -W` waiter alone may leave the app running. The installer
+handles both when run again with `--install`. Do not start a second Python
+manager alongside the app.
 
 This is a **login-only** user agent; paths must be absolute. Keep the Mac awake.
 Boot-before-login and lid/sleep changes are outside this setup. Linux user-service
 templates are also provided (`uniremote-wiz.service.example` and the env example).
-Nothing in this repository installs services automatically.
+Only the explicit `--install` command installs/loads the Mac login job. Running
+the Python manager alone does not install a service or change sleep settings.
 
 Before changing manager URLs, disable and Save the old manager's timetable, then
 stop it. To move its state, copy `~/.local/state/uniremote-wiz/` while both managers
