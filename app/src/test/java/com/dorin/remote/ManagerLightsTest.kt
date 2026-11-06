@@ -139,7 +139,7 @@ class ManagerLightsTest {
         assertEquals(ManagerConnection.UNAVAILABLE, lights.managerConnection.current())
         assertTrue(lights.pilots.value.isEmpty())
         assertEquals(1, lights.bulbs.value.size) // last manager list, explicitly status unknown
-        assertTrue(lights.error.value!!.contains("No direct bulb command"))
+        assertTrue(lights.error.value!!.contains("status unavailable"))
         try { lights.setRoom("Manager room", LightMode.NIGHT); fail("Expected command error") } catch (_: IllegalStateException) { }
         assertEquals(listOf("/v1/status", "/v1/room"), calls)
     }
@@ -155,15 +155,9 @@ class ManagerLightsTest {
             if (path == "/v1/room") JSONObject().put("answered", 0).put("total", 1).put("errors", JSONObject().put(mac, "MAC mismatch"))
             else snapshot
         }
-        try { lights.command("Manager room", "ON"); fail("Expected explicit manager error") }
-        catch (e: BulbsDidNotAnswer) {
-            assertTrue(e.message!!.contains("MAC mismatch"))
-            assertEquals("Manager room", e.room)
-            val feedback = lightingCommandFailure(e)
-            assertTrue(feedback.startsWith("Manager connected."))
-            assertTrue(feedback.contains("Manager room: no bulbs answered"))
-            assertFalse(feedback.contains("unavailable"))
-        }
+        val result = lights.command("Manager room", "ON")
+        assertEquals(0, result.answered)
+        assertEquals("Manager room: requested; bulb not yet confirmed", result.feedback("Manager room"))
         assertEquals(listOf("/v1/room", "/v1/status"), calls)
         assertTrue(lights.loaded.value)
         assertTrue(lights.pilots.value.isEmpty())
@@ -179,6 +173,68 @@ class ManagerLightsTest {
         assertFalse(feedback.contains("no direct command sent"))
     }
 
+    @Test fun acknowledgementSurvivesStatusFailureWithoutRetryingPost() = runBlocking {
+        val calls = mutableListOf<String>()
+        val lights = Lights { path, _ ->
+            calls += path
+            if (path == "/v1/room") JSONObject().put("answered", 1).put("total", 1)
+            else throw java.io.IOException("Read timed out")
+        }
+        lights.acceptStatus(status())
+        val result = lights.command("Manager room", "TOGGLE")
+        assertEquals(1, result.answered)
+        assertFalse(result.statusAvailable)
+        assertEquals("Manager room: 1 of 1 confirmed; status refresh unavailable", result.feedback("Manager room"))
+        assertFalse(lights.loaded.value)
+        assertEquals(ManagerConnection.UNAVAILABLE, lights.managerConnection.current())
+        assertEquals(listOf("/v1/room", "/v1/status"), calls)
+    }
+
+    @Test fun partialAcknowledgementsUseCommandCountsNotLaterStatus() = runBlocking {
+        val lights = Lights { path, _ ->
+            if (path == "/v1/room") JSONObject().put("answered", 2).put("total", 3) else status()
+        }
+        val result = lights.command("Manager room", "NIGHT")
+        assertEquals("Manager room: 2 of 3 bulbs confirmed", result.feedback("Manager room"))
+    }
+
+    @Test fun zeroAcknowledgementsRemainPendingEvenIfStatusRefreshFails() = runBlocking {
+        val lights = Lights { path, _ ->
+            if (path == "/v1/room") JSONObject().put("answered", 0).put("total", 1)
+            else throw java.io.IOException("offline")
+        }
+        val result = lights.command("Manager room", "AUTO")
+        assertEquals(0, result.answered)
+        assertEquals("Manager room: requested; bulb not yet confirmed; status refresh unavailable", result.feedback("Manager room"))
+        assertFalse(lights.loaded.value)
+    }
+
+    @Test fun httpPostDisconnectDoesNotAutomaticallyResendCommand() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        server.enqueue(MockResponse().setBody("""{"answered":1,"total":1}"""))
+        server.start()
+        try {
+            try {
+                ButlerClient.exchange(server.url("/").toString(), "/v1/room", JSONObject().put("room", "Fake room").put("mode", "TOGGLE"))
+                fail("Expected unknown outcome after disconnect")
+            } catch (e: java.io.IOException) {
+                assertTrue(lightingCommandFailure(e).contains("outcome unknown"))
+            }
+            assertEquals(1, server.requestCount)
+        } finally { server.shutdown() }
+    }
+
+    @Test fun postTimeoutIsUnknownAndNeverRetried() = runBlocking {
+        var calls = 0
+        val lights = Lights { _, _ -> calls++; throw java.net.SocketTimeoutException("Read timed out") }
+        try { lights.command("Manager room", "TOGGLE"); fail("Expected unknown outcome") }
+        catch (e: java.net.SocketTimeoutException) {
+            assertTrue(lightingCommandFailure(e).contains("not confirmed"))
+        }
+        assertEquals(1, calls)
+    }
+
     @Test fun httpRequestsNeedNoCredentialsForAnyEndpointAndExposeServerErrors() = runBlocking {
         val server = MockWebServer()
         repeat(6) { server.enqueue(MockResponse().setBody("{}")) }
@@ -191,7 +247,10 @@ class ManagerLightsTest {
                 ButlerClient.exchange(url, path, JSONObject())
             }
             try { ButlerClient.exchange(url, "/v1/room", JSONObject()); fail("Expected server error") }
-            catch (e: IllegalStateException) { assertEquals("MAC mismatch", e.message) }
+            catch (e: com.dorin.remote.wiz.ButlerRequestRejected) {
+                assertEquals("MAC mismatch", e.message)
+                assertEquals("Lighting request rejected: MAC mismatch", lightingCommandFailure(e))
+            }
             assertEquals(7, server.requestCount)
             val requests = (0 until 7).map { server.takeRequest() }
             assertEquals("GET", requests.first().method)

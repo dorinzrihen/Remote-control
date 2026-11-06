@@ -18,6 +18,10 @@ import com.dorin.remote.tizen.SamsungState
 import com.dorin.remote.webos.LgState
 import com.dorin.remote.wiz.LightMode
 import com.dorin.remote.wiz.ButlerClient
+import com.dorin.remote.wiz.Timetable
+import com.dorin.remote.wiz.TimetableEditor
+import com.dorin.remote.wiz.TimetableConflict
+import com.dorin.remote.wiz.saveTimetable
 import com.dorin.remote.wiz.Pilot
 import com.dorin.remote.wiz.lightingCommandFailure
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -110,6 +114,21 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val butlerEnabled = MutableStateFlow(prefs.butlerEnabled)
     val butlerBusy = MutableStateFlow(false)
     val butlerSettings = MutableStateFlow<org.json.JSONObject?>(null)
+    val timetableEditor = MutableStateFlow<TimetableEditor?>(null)
+    fun editTimetable(draft: Timetable) { timetableEditor.value = timetableEditor.value?.copy(draft = draft) }
+    fun reloadTimetable() {
+        if (butlerBusy.value) return
+        viewModelScope.launch {
+            butlerBusy.value = true
+            try {
+                adoptManager(prefs.butlerUrl, ButlerClient.exchange(prefs.butlerUrl, "/v1/status"))
+                timetableEditor.value = timetableEditor.value?.reload()
+                butlerStatus.value = "Latest timetable loaded"
+            } catch (e: Exception) { butlerStatus.value = "Reload unavailable; your edits are kept. ${e.message}" }
+            finally { butlerBusy.value = false }
+        }
+    }
+    fun reapplyTimetable() { timetableEditor.value = timetableEditor.value?.reapply() }
     val butlerStatus = MutableStateFlow("Not connected")
     val foundButlers = MutableStateFlow<List<FoundButler>>(emptyList())
     val selectedButlerUrl = MutableStateFlow("")
@@ -621,8 +640,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         if (prefs.butlerUrl.isBlank() || butlerBusy.value) return
         try {
             lights.refresh()
-            butlerEnabled.value = lights.config.value?.getBoolean("enabled") ?: false
-            prefs.butlerEnabled = butlerEnabled.value
+            syncButlerSettings(lights.config.value!!)
             butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
         } catch (e: Exception) { butlerStatus.value = "Manager unavailable: ${e.message}" }
     }
@@ -638,14 +656,21 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     private fun adoptManager(url: String, result: org.json.JSONObject, name: String = foundButlers.value.firstOrNull { it.url == url.trim().trimEnd('/') }?.name.orEmpty()) {
         lights.acceptStatus(result)
         val normalized = url.trim().trimEnd('/')
+        if (normalized != prefs.butlerUrl) timetableEditor.value = null
         if (normalized != prefs.butlerUrl || name.isNotBlank()) prefs.butlerServiceName = name
         prefs.butlerUrl = normalized
         selectedButlerUrl.value = normalized
-        prefs.butlerEnabled = result.getJSONObject("config").getBoolean("enabled")
         prefs.butlerPending = false
+        syncButlerSettings(result.getJSONObject("config"))
+    }
+
+    private fun syncButlerSettings(config: org.json.JSONObject) {
+        prefs.butlerEnabled = config.getBoolean("enabled")
         butlerEnabled.value = prefs.butlerEnabled
-        butlerSettings.value = result.getJSONObject("config")
+        butlerSettings.value = config
         prefs.butlerConfig = butlerSettings.value.toString()
+        val timetable = Timetable.from(config)
+        timetableEditor.value = timetableEditor.value?.observe(timetable) ?: TimetableEditor(timetable)
     }
 
     fun loadButler(url: String) {
@@ -667,6 +692,11 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveButler(url: String, enabled: Boolean, night: String, morning: String, timezone: String, pollSeconds: String) {
         if (butlerBusy.value || !canUseManager(url)) return
+        val editor = timetableEditor.value ?: return
+        if (editor.conflict) {
+            butlerStatus.value = "Timetable changed on another phone. Reload or reapply your edits."
+            return
+        }
         if (butlerSettings.value == null || url.trim().trimEnd('/') != prefs.butlerUrl) {
             butlerStatus.value = "Load this manager first, then edit and Save its timetable."
             return
@@ -688,16 +718,19 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             butlerBusy.value = true
             try {
-                // Read current settings first, then save ONLY the
-                // timetable. Even an empty/reinstalled phone cannot erase bulbs.
-                val current = ButlerClient.exchange(url, "/v1/status")
-                adoptManager(url, current)
-                val config = ButlerClient.config(enabled, night, morning, timezone, interval)
                 prefs.butlerUrl = url.trim().trimEnd('/')
                 prefs.butlerPending = true
-                val result = ButlerClient.exchange(url, "/v1/config", config)
+                val result = saveTimetable(editor.copy(draft = Timetable(enabled, night, morning, timezone, pollSeconds)),
+                    { path, body -> ButlerClient.exchange(url, path, body) }, { adoptManager(url, it) })
                 adoptManager(url, result)
+                timetableEditor.value = TimetableEditor(Timetable.from(result.getJSONObject("config")))
                 butlerStatus.value = if (enabled) "Timetable saved" else "Timetable off"
+            } catch (_: TimetableConflict) {
+                timetableEditor.value = timetableEditor.value?.copy(rejected = true)
+                // A server-side comparison may catch a write after our fresh GET.
+                // Keep the draft while bringing the conflict choices up to date.
+                runCatching { adoptManager(url, ButlerClient.exchange(url, "/v1/status")) }
+                butlerStatus.value = "Timetable changed on another phone. Reload or reapply your edits."
             } catch (e: Exception) { butlerStatus.value = "Save unconfirmed: ${e.message}. Load manager status before retrying." }
             finally { butlerBusy.value = false }
         }
@@ -706,8 +739,8 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     fun followTimetable(room: String) {
         viewModelScope.launch {
             try {
-                val ok = lights.command(room, "AUTO")
-                say("$room: $ok bulb(s) returned to timetable; off bulbs stay off")
+                val result = lights.command(room, "AUTO")
+                say(result.feedback(room) ?: "$room: ${result.answered} bulb(s) returned to timetable; off bulbs stay off")
             } catch (e: Exception) { say(lightingCommandFailure(e)) }
         }
     }
@@ -715,11 +748,9 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     /** A null mode turns the room off. */
     fun setRoom(room: String, mode: LightMode?) {
         viewModelScope.launch {
-            val total = lights.bulbs.value.count { it.room == room }
-            val ok = try { lights.setRoom(room, mode) }
+            val result = try { lights.setRoom(room, mode) }
                 catch (e: Exception) { say(lightingCommandFailure(e)); return@launch }
-            if (ok == 0) say("$room: bulbs did not answer the manager. Check the manager LAN and wall switches.")
-            else if (ok < total) say("$room: ${total - ok} of $total bulbs did not answer")
+            result.feedback(room)?.let { say(it) }
         }
     }
 
@@ -727,9 +758,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleRoom(room: String) {
         viewModelScope.launch {
             try {
-                val ok = lights.command(room, "TOGGLE")
-                val total = lights.bulbs.value.count { it.room == room }
-                if (ok < total) say("$room: ${total - ok} of $total bulbs did not answer")
+                lights.command(room, "TOGGLE").feedback(room)?.let { say(it) }
             } catch (e: Exception) { say(lightingCommandFailure(e)) }
         }
     }

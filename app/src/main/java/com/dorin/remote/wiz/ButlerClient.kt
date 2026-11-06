@@ -10,11 +10,13 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
+class ButlerRequestRejected(message: String) : IllegalStateException(message)
+
 /** Home-LAN connection to the sole lighting manager, never a UDP fallback. */
 object ButlerClient {
     private val http = OkHttpClient.Builder().connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(35, TimeUnit.SECONDS)
-        .followRedirects(false).followSslRedirects(false).build()
+        .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build()
 
     fun config(enabled: Boolean, night: String, morning: String, timezone: String, pollSeconds: Int = 1): JSONObject =
         JSONObject().put("enabled", enabled).put("night", night).put("morning", morning).put("timezone", timezone)
@@ -34,7 +36,8 @@ object ButlerClient {
         if (body != null) request.post(body.toString().toRequestBody("application/json".toMediaType()))
         http.newCall(request.build()).execute().use { response ->
             val result = JSONObject(response.body?.string() ?: "{}")
-            check(response.isSuccessful) { result.optString("error", "Butler HTTP ${response.code}") }
+            if (response.code == 409 && path == "/v1/config") throw TimetableConflict()
+            if (!response.isSuccessful) throw ButlerRequestRejected(result.optString("error", "Butler HTTP ${response.code}"))
             result
         }
     }

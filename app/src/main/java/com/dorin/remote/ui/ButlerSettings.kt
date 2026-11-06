@@ -25,7 +25,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dorin.remote.RemoteViewModel
-import java.util.TimeZone
 
 @Composable
 fun ButlerSettings(vm: RemoteViewModel) {
@@ -33,6 +32,7 @@ fun ButlerSettings(vm: RemoteViewModel) {
     val busy by vm.butlerBusy.collectAsState()
     val status by vm.butlerStatus.collectAsState()
     val settings by vm.butlerSettings.collectAsState()
+    val editor by vm.timetableEditor.collectAsState()
     val loaded by vm.lights.loaded.collectAsState()
     val managers by vm.foundButlers.collectAsState()
     val selected by vm.selectedButlerUrl.collectAsState()
@@ -40,22 +40,11 @@ fun ButlerSettings(vm: RemoteViewModel) {
     var showConnection by remember { mutableStateOf(false) }
     var showTimetable by remember { mutableStateOf(false) }
     var url by remember { mutableStateOf(vm.prefs.butlerUrl) }
-    var enabled by remember { mutableStateOf(active) }
-    var night by remember { mutableStateOf("21:00") }
-    var morning by remember { mutableStateOf("06:00") }
-    var timezone by remember { mutableStateOf(TimeZone.getDefault().id) }
-    var pollSeconds by remember { mutableStateOf("1") }
+    val draft = editor?.draft
     LaunchedEffect(Unit) {
         if (vm.prefs.butlerUrl.isNotBlank()) vm.loadButler(vm.prefs.butlerUrl)
     }
     LaunchedEffect(Unit) { vm.discoverButlers() }
-    LaunchedEffect(settings) {
-        settings?.let {
-            enabled = it.getBoolean("enabled")
-            night = it.getString("night"); morning = it.getString("morning"); timezone = it.getString("timezone")
-            pollSeconds = it.optInt("pollSeconds", 1).toString()
-        }
-    }
     Column(Modifier.fillMaxWidth().background(Surface2, RoundedCornerShape(14.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Lighting manager", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Text(status, color = TextDim, fontSize = 12.sp)
@@ -67,24 +56,31 @@ fun ButlerSettings(vm: RemoteViewModel) {
             }
         }
         if (loaded) {
-            Text(if (active) "Night $night · Day $morning" else "Timetable off", color = TextDim, fontSize = 12.sp)
+            Text(if (active) "Night ${settings?.optString("night")} · Day ${settings?.optString("morning")}" else "Timetable off", color = TextDim, fontSize = 12.sp)
             PillButton(if (showTimetable) "Hide timetable" else "Edit timetable") { showTimetable = !showTimetable }
         }
-        if (loaded && showTimetable) {
+        if (draft != null && showTimetable) {
+            if (editor?.conflict == true) {
+                Text("Timetable changed on another phone. Your edits are kept.", color = TextDim, fontSize = 12.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PillButton("Reload settings") { if (!busy) vm.reloadTimetable() }
+                    PillButton("Reapply my edits") { if (!busy) vm.reapplyTimetable() }
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Timetable", color = TextMain, modifier = Modifier.weight(1f))
-                Switch(enabled, { enabled = it }, enabled = !busy)
+                Switch(draft.enabled, { vm.editTimetable(draft.copy(enabled = it)) }, enabled = !busy)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(night, { night = it }, label = { Text("Night HH:MM") }, singleLine = true, enabled = !busy, modifier = Modifier.weight(1f))
-                OutlinedTextField(morning, { morning = it }, label = { Text("Day HH:MM") }, singleLine = true, enabled = !busy, modifier = Modifier.weight(1f))
+                OutlinedTextField(draft.night, { vm.editTimetable(draft.copy(night = it)) }, label = { Text("Night HH:MM") }, singleLine = true, enabled = !busy, modifier = Modifier.weight(1f))
+                OutlinedTextField(draft.morning, { vm.editTimetable(draft.copy(morning = it)) }, label = { Text("Day HH:MM") }, singleLine = true, enabled = !busy, modifier = Modifier.weight(1f))
             }
-            OutlinedTextField(timezone, { timezone = it }, label = { Text("Timezone") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(pollSeconds, { pollSeconds = it }, label = { Text("Poll interval (seconds)") }, singleLine = true, enabled = !busy,
+            OutlinedTextField(draft.timezone, { vm.editTimetable(draft.copy(timezone = it)) }, label = { Text("Timezone") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(draft.pollSeconds, { vm.editTimetable(draft.copy(pollSeconds = it)) }, label = { Text("Poll interval (seconds)") }, singleLine = true, enabled = !busy,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
             Text("Regular: 100% cool · Night: 20% warm. Off bulbs stay off.", color = TextDim, fontSize = 12.sp)
             PillButton(if (busy) "Saving…" else "Save timetable", modifier = Modifier.fillMaxWidth(), color = Accent, contentColor = Bg) {
-                if (!busy) vm.saveButler(vm.prefs.butlerUrl, enabled, night, morning, timezone, pollSeconds)
+                if (!busy) vm.saveButler(vm.prefs.butlerUrl, draft.enabled, draft.night, draft.morning, draft.timezone, draft.pollSeconds)
             }
         }
         PillButton(if (showConnection) "Hide connection" else "Advanced connection") {

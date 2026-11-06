@@ -7,6 +7,15 @@ import org.json.JSONObject
 /** Bulb identity and address supplied by the manager, never a phone-owned list. */
 data class Bulb(val mac: String, val ip: String, val room: String)
 
+data class LightingCommandResult(val answered: Int, val total: Int, val statusAvailable: Boolean) {
+    fun feedback(room: String): String? = when {
+        answered == 0 -> "$room: requested; bulb not yet confirmed" + if (!statusAvailable) "; status refresh unavailable" else ""
+        !statusAvailable -> "$room: $answered of $total confirmed; status refresh unavailable"
+        answered < total -> "$room: $answered of $total bulbs confirmed"
+        else -> null
+    }
+}
+
 /** HTTP-only lighting client. There is deliberately no bulb network transport on Android. */
 class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) {
     constructor(prefs: Prefs) : this({ path, body -> ButlerClient.exchange(prefs.butlerUrl, path, body) })
@@ -74,7 +83,7 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
         roomControls.value = bulbs.value.map { it.room }.distinct().associateWith {
             RoomControlState(status = "manager unavailable / status unknown")
         }
-        error.value = "Manager unavailable: $message. No direct bulb command was sent."
+        error.value = "Manager status unavailable: $message"
     }
 
     suspend fun refresh() {
@@ -103,16 +112,18 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
         }.toMap()
     }
 
-    suspend fun command(room: String, mode: String): Int {
+    suspend fun command(room: String, mode: String): LightingCommandResult {
         val result = exchange("/v1/room", JSONObject().put("room", room).put("mode", mode))
-        refresh()
         val ok = result.getInt("answered")
-        if (ok == 0) throw BulbsDidNotAnswer(room, result.optJSONObject("errors")?.toString() ?: "No bulbs acknowledged the manager command")
-        check(ok > 0) { "Invalid acknowledgement count from the lighting manager" }
-        return ok
+        val total = result.optInt("total", bulbs.value.count { it.room == room })
+        check(ok >= 0 && total >= ok) { "Invalid acknowledgement count from the lighting manager" }
+        val available = try { refresh(); true }
+        catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) { false }
+        return LightingCommandResult(ok, total, available)
     }
 
-    suspend fun setRoom(room: String, mode: LightMode?): Int = command(room, mode?.name ?: "OFF")
+    suspend fun setRoom(room: String, mode: LightMode?): LightingCommandResult = command(room, mode?.name ?: "OFF")
 
     suspend fun blink(mac: String) {
         acceptStatus(exchange("/v1/bulbs/blink", JSONObject().put("mac", mac)))
