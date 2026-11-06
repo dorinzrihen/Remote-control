@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
+import signal
 
 spec = importlib.util.spec_from_file_location("install_launcher", Path(__file__).parent / "macos/install_launcher.py")
 launcher = importlib.util.module_from_spec(spec)
@@ -22,3 +24,21 @@ class MacLauncherTest(unittest.TestCase):
         self.assertEqual(["com.uniremote.lights"], job["AssociatedBundleIdentifiers"])
         self.assertTrue(job["RunAtLoad"])
         self.assertTrue(job["KeepAlive"])
+
+    def test_idle_old_launcher_can_be_closed_without_rebuilding_identity(self):
+        app = Path("/Users/test/Applications/Butler Lights.app")
+        binary = str(app / "Contents/MacOS/ButlerLights")
+        with patch.object(launcher.subprocess, "check_output", side_effect=[f"123 {binary}\n", f"123 1 {binary}\n"]), \
+             patch.object(launcher.time, "monotonic", side_effect=[0, 9]), \
+             patch.object(launcher.os, "kill") as kill:
+            launcher.stop_running_app(app)
+        self.assertEqual([(123, signal.SIGTERM), (123, signal.SIGKILL)], [c.args for c in kill.call_args_list])
+
+    def test_unresponsive_launcher_with_manager_is_not_force_killed(self):
+        app = Path("/Users/test/Applications/Butler Lights.app")
+        binary = str(app / "Contents/MacOS/ButlerLights")
+        with patch.object(launcher.subprocess, "check_output", side_effect=[f"123 {binary}\n", f"123 1 {binary}\n124 123 Python\n"]), \
+             patch.object(launcher.time, "monotonic", side_effect=[0, 9]), \
+             patch.object(launcher.os, "kill") as kill, self.assertRaises(SystemExit):
+            launcher.stop_running_app(app)
+        self.assertEqual([(123, signal.SIGTERM)], [c.args for c in kill.call_args_list])

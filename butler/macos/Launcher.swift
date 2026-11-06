@@ -37,9 +37,7 @@ final class LightsApplication: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.log("Manager exited with status \(process.terminationStatus)")
-                    if self.quitting {
-                        NSApp.reply(toApplicationShouldTerminate: true)
-                    } else {
+                    if !self.quitting {
                         NSApp.terminate(nil)
                     }
                 }
@@ -60,7 +58,10 @@ final class LightsApplication: NSObject, NSApplicationDelegate {
         guard let child = manager, child.isRunning else { return .terminateNow }
         quitting = true
         child.terminate()
-        return .terminateLater
+        // Do not await a main-queue termination callback while AppKit's
+        // termination handshake has that queue suspended.
+        child.waitUntilExit()
+        return .terminateNow
     }
 
     private func log(_ message: String) {

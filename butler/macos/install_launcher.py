@@ -55,7 +55,18 @@ def stop_running_app(app):
                 break
             time.sleep(0.1)
         else:
-            raise SystemExit("Previous launcher did not quit; no second instance will be started")
+            # Upgrade recovery for the first launcher version: AppKit could
+            # suspend its quit callback after Python had already exited. Close
+            # ONLY that exact, now-childless wrapper; never orphan a manager.
+            remaining = subprocess.check_output(["/bin/ps", "-axo", "pid=,ppid=,comm="], text=True)
+            processes = [row.strip().split(None, 2) for row in remaining.splitlines()]
+            same_app = any(len(row) == 3 and row[0] == str(pid) and row[2] == executable for row in processes)
+            has_child = any(len(row) == 3 and row[1] == str(pid) for row in processes)
+            if same_app and not has_child:
+                print("Closing idle launcher after its manager exited.")
+                os.kill(pid, signal.SIGKILL)
+            else:
+                raise SystemExit("Previous launcher did not quit; no second instance will be started")
 
 
 def main():
@@ -105,10 +116,9 @@ def main():
         backup.mkdir(parents=True, mode=0o700)
         shutil.copy2(plist, backup / plist.name)
         print("Previous login job backed up:", backup)
-        # A stopped job may return a nonzero status; do not kill unrelated jobs.
-        stopped = subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}", str(plist)], capture_output=True, text=True)
-        if stopped.returncode and "No such process" not in stopped.stderr and "Could not find service" not in stopped.stderr:
-            raise SystemExit("Could not unload the existing manager: " + stopped.stderr)
+        loaded = subprocess.run(["/bin/launchctl", "print", f"gui/{os.getuid()}/com.uniremote.wiz"], capture_output=True)
+        if loaded.returncode == 0:
+            subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}", str(plist)], check=True)
     stop_running_app(app)
     with plist.open("wb") as output:
         plistlib.dump(login_job(home, app), output)
