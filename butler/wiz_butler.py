@@ -142,6 +142,8 @@ class Butler:
         self.config = validate_config(stored.get("config", DEFAULT_CONFIG))
         self.holds = stored.get("holds", {})
         self.intents = stored.get("intents", {})
+        self.progress_dirty = False
+        self.persistence_error = None
         self.addresses = {}
         self.last_discovery = 0
         self.errors = {}
@@ -160,6 +162,8 @@ class Butler:
             output.flush()
             os.fsync(output.fileno())
         temporary.replace(self.path)
+        self.progress_dirty = False
+        self.persistence_error = None
 
     def configure(self, value):
         with self.lock:
@@ -340,16 +344,21 @@ class Butler:
                 except OSError:
                     logging.warning("Discovery failed; retaining known addresses")
                 self.last_discovery = now
-            self.expire_intents(now)
             for bulb in self.config["bulbs"]:
                 current = self.pilot(bulb)
                 if bulb["mac"] not in self.system_configs:
                     self.read_system_config(bulb)
                 self.reconcile(bulb, now, current)
+            self.expire_intents(now)
 
     def expire_intents(self, now):
-        expired = [mac for mac, until in self.holds.items() if until <= now]
-        if expired:
+        # Effective expiry is time-based in desired(), never conditional on a
+        # successful disk write. Keep old records after failed cleanup so a
+        # subsequent cycle can persist it without blocking reads or correction.
+        expired = [mac for mac, until in self.holds.items() if until <= now or (
+            self.intents.get(mac, {}).get("mode") == "OFF" and
+            not self.intents[mac]["powerPending"])]
+        if expired or self.progress_dirty:
             holds, intents = dict(self.holds), dict(self.intents)
             for mac in expired:
                 self.holds.pop(mac, None)
@@ -358,22 +367,33 @@ class Butler:
                 self.save()
             except OSError:
                 self.holds, self.intents = holds, intents
-                raise
+                self.progress_dirty = True
+                self.persistence_error = "State changes could not be saved; retrying"
+
+    def active_intent(self, mac, now):
+        return self.intents.get(mac) if self.holds.get(mac, 0) > now else None
 
     def desired(self, bulb, now, current):
         mac = bulb["mac"]
-        intent = self.intents.get(mac)
+        held = self.holds.get(mac, 0) > now
+        intent = self.active_intent(mac, now)
         if intent:
             if intent["mode"] == "OFF":
-                return {"state": False}
-            preset = MODES[intent["mode"]]
-            # Power is a one-time explicit request, not permission to undo a
-            # subsequent wall-switch OFF on every poll. Keep it pending until
-            # a read verifies delivery, including after an ambiguous UDP reply.
-            if intent["powerPending"]:
-                return {"state": True, **preset}
-            return preset if current["state"] else {}
-        if mac in self.holds or not self.config["enabled"]:
+                if intent["powerPending"]:
+                    return {"state": False}
+                # Verified OFF is delivery, not a sticky power guard. A later
+                # wall/software ON follows the timetable, even if saving the
+                # retired hold is temporarily impossible.
+                held = False
+            else:
+                preset = MODES[intent["mode"]]
+                # Power is a one-time explicit request, not permission to undo a
+                # subsequent wall-switch OFF on every poll. Keep it pending until
+                # a read verifies delivery, including after an ambiguous UDP reply.
+                if intent["powerPending"]:
+                    return {"state": True, **preset}
+                return preset if current["state"] else {}
+        if held or not self.config["enabled"]:
             return {}  # Legacy hold: its unknown preset must not be invented.
         return MODES[schedule(self.config, now)[0]] if current["state"] else {}
 
@@ -399,14 +419,10 @@ class Butler:
             # relative-only intent after the fresh pre-write safety check.
             desired = self.desired(bulb, now, current)
         if self.matches(current, desired):
-            intent = self.intents.get(mac)
-            if intent and intent["powerPending"] and intent["mode"] != "OFF":
+            intent = self.active_intent(mac, now)
+            if intent and intent["powerPending"]:
                 self.intents[mac] = intent | {"powerPending": False}
-                try:
-                    self.save()
-                except OSError:
-                    self.intents[mac] = intent
-                    raise
+                self.progress_dirty = True
             self.errors.pop(mac, None)
             return acknowledged
         self.errors[mac] = "desired state pending" if acknowledged else "command not acknowledged; desired state pending"
@@ -426,7 +442,6 @@ class Butler:
             pilots = {bulb["mac"]: self.pilot(bulb) for bulb in bulbs}
             if mode == "TOGGLE":
                 mode = "OFF" if any(p and p["state"] for p in pilots.values()) else "ON"
-            self.expire_intents(now)
             current_mode, _, following = schedule(self.config, now)
             old_holds, old_intents = dict(self.holds), dict(self.intents)
             for bulb in bulbs:
@@ -436,7 +451,7 @@ class Butler:
                 else:
                     self.holds[bulb["mac"]] = following
                     self.intents[bulb["mac"]] = {"mode": current_mode if mode == "ON" else mode,
-                                                "createdAt": now, "powerPending": mode != "OFF"}
+                                                "createdAt": now, "powerPending": True}
             # Persist intent before writing, so restart or a lost UDP reply
             # cannot cause the scheduler to undo a manual action.
             try:
@@ -448,15 +463,29 @@ class Butler:
             for bulb in bulbs:
                 if self.reconcile(bulb, now, pilots[bulb["mac"]]):
                     ok += 1
+            self.expire_intents(now)
             self.changed.set()
-            return {"answered": ok, "total": len(bulbs), "errors": dict(self.errors)}
+            return {"answered": ok, "total": len(bulbs), "errors": self.reported_errors()}
+
+    def reported_errors(self):
+        errors = dict(self.errors)
+        if self.persistence_error:
+            for bulb in self.config["bulbs"]:
+                mac = bulb["mac"]
+                errors[mac] = "; ".join(filter(None, (errors.get(mac), self.persistence_error)))
+        return errors
 
     def status(self):
         with self.lock:
             bulbs = [b | {"ip": self.addresses.get(b["mac"], b["ip"])} for b in self.config["bulbs"]]
             saved = {b["mac"] for b in bulbs}
-            return {"config": self.config | {"bulbs": bulbs}, "holds": dict(self.holds), "errors": dict(self.errors),
-                    "intents": {mac: dict(intent) for mac, intent in self.intents.items()},
+            retired = {mac for mac, intent in self.intents.items()
+                       if intent["mode"] == "OFF" and not intent["powerPending"]}
+            return {"config": self.config | {"bulbs": bulbs},
+                    "holds": {mac: until for mac, until in self.holds.items() if mac not in retired},
+                    "errors": self.reported_errors(),
+                    "persistenceError": self.persistence_error,
+                    "intents": {mac: dict(intent) for mac, intent in self.intents.items() if mac not in retired},
                     "pilots": {mac: p for mac, p in self.observed.items() if mac in saved},
                     "systemConfigs": {mac: c for mac, c in self.system_configs.items() if mac in saved},
                     "observedAt": {mac: at for mac, at in self.observed_at.items() if mac in saved},

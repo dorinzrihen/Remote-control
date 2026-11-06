@@ -80,15 +80,22 @@ needed. Run one manager per home/state file; keep a state backup before upgradin
   non-boundary times; matching bulbs receive no write. Timetable changes never
   request power: off bulbs stay off. Unreachable bulbs are read again next cycle.
   Add and Save themselves send no command, but the next poll reconciles on bulbs.
-- **On/Off/Regular/Night** (including the on/off toggle) persist their explicit
+- **On/Regular/Night** (including the toggle's On action) persist their explicit
   desired settings until the **next configured timetable boundary**, surviving
   unreachable bulbs, lost acknowledgements and restart. **On** captures the current
   home-time preset; it does not resume automatic mode. As before, explicit On,
   Regular and Night requests can turn a bulb on. Their power-on request remains
   pending until a read verifies the desired state; thereafter only their preset
   is reconciled on already-on bulbs, so a later wall/software Off stays off.
-  Explicit Off is reconciled as Off until expiry. Preset intent remains stored
-  while a bulb is off and is corrected when it is next observed on.
+  Preset intent remains stored while a bulb is off and is corrected when it is
+  next observed on.
+- **Off** (including the toggle's Off action) is a delivery request, not a sticky
+  power guard. It stays pending through unreachability, failed writes and restart
+  until a read confirms Off, or until the next timetable boundary expires it.
+  Confirmation retires the Off override/hold: the bulb normally remains off, but
+  a later physical/software On is allowed and its colour/brightness follows the
+  current timetable when enabled. With the timetable disabled, no automatic
+  preset is applied. An unconfirmed queued Off is not silently retargeted.
 - **Follow timetable** (`AUTO`) clears explicit/legacy holds and pending power
   intent, applies the current preset to on bulbs and leaves off bulbs off. It
   requires an enabled timetable. Disabling the timetable stops automatic preset
@@ -102,6 +109,14 @@ needed. Run one manager per home/state file; keep a state backup before upgradin
   retransmitted within a UDP request; acknowledgement alone is not proof of the
   setting being applied. A fresh successful read does not clear an error while
   the desired mismatch remains unresolved.
+- Expiry is effective even if a full/unwritable disk prevents durable cleanup.
+  Reads and reconciliation continue; cleanup is retried after each cycle. Pending
+  completion updates also do not block other bulbs. `persistenceError` and the
+  existing per-bulb `errors` report the storage problem until a save succeeds;
+  successful bulb reads do not clear it. Expired records are ignored after restart
+  even if storage is still failing. As with any pending command, losing power
+  before a delivery confirmation can be saved leaves its old pending record on
+  disk; delivery cannot be distinguished from an unconfirmed request on restart.
 - Every write checks the bulb's MAC at its current IP. Blink is serialized with
   scheduling, preserves holds and attempts to restore the original power/preset;
   a failed restore is reported for inspection. Disabling scheduling is not needed
@@ -142,7 +157,10 @@ Unix seconds), `errors`, `holds`, plus `lastPoll`, `statusAt` and `native:false`
 The additive `intents` map contains `{mode, createdAt, powerPending}` per explicitly
 held MAC; legacy unknown holds have no entry. `holds` remains absolute Unix expiry
 seconds for old/new clients' Follow indicators. An override is removed on the first
-poll at/after expiry; no boundary event needs to have succeeded.
+poll at/after expiry; no boundary event needs to have succeeded. If cleanup cannot
+be saved, expired records may remain in status with past expiry timestamps but
+have no effect. Confirmed Off holds are omitted immediately, even while durable
+cleanup is pending, so Follow indicators do not show a retired override.
 An unreachable/MAC-mismatched bulb loses its current pilot, but retains its last
 successful observation time. Android rejects mismatched/error pilots and ages
 over `max(5, pollSeconds × 3)` seconds; unknown/stale is **not** reported as off.

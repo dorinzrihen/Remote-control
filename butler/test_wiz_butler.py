@@ -287,10 +287,141 @@ class ButlerTest(unittest.TestCase):
 
     def test_manual_off_stays_off(self):
         self.butler.command("Bedroom", "OFF", at(22))
+        self.assertNotIn(MAC, self.butler.holds)
+        self.assertNotIn(MAC, self.butler.intents)
         self.butler.tick(at(22, 1))
         self.butler.tick(at(6, day=6))
         self.assertFalse(self.udp.state["state"])
         self.assertEqual(1, len(self.udp.writes))
+
+    def test_confirmed_off_allows_later_wall_on_and_reconciles_timetable(self):
+        self.butler.command("Bedroom", "OFF", at(23, 17))
+        self.butler = Butler(self.path, self.udp)
+        self.butler.tick(at(23, 18))
+        self.assertFalse(self.udp.state["state"])
+        self.assertEqual(1, len(self.udp.writes))
+        self.udp.state.update(state=True, temp=4100, dimming=43)
+        self.butler.tick(at(23, 19))
+        self.assertTrue(self.udp.state["state"])
+        self.assertTrue(self.butler.matches(self.udp.state, MODES["NIGHT"]))
+        self.assertNotIn("state", self.udp.writes[-1][2])
+        self.assertNotIn(MAC, self.butler.status()["holds"])
+        self.assertNotIn(MAC, self.butler.status()["intents"])
+
+    def test_unreachable_off_is_pending_until_confirmed_then_wall_on_is_allowed(self):
+        self.udp.state = None
+        self.assertEqual(0, self.butler.command("Bedroom", "OFF", at(23, 17))["answered"])
+        self.assertTrue(self.butler.intents[MAC]["powerPending"])
+        self.butler = Butler(self.path, self.udp)
+        self.butler.tick(at(23, 18))
+        self.assertIn(MAC, self.butler.intents)
+        self.udp.state = {"mac": MAC, "state": True, **MODES["REGULAR"]}
+        self.udp.ack = False
+        self.butler.tick(at(23, 19))
+        self.assertTrue(self.udp.state["state"])
+        self.assertTrue(self.butler.intents[MAC]["powerPending"])
+        self.assertEqual({"state": False}, self.udp.writes[-1][2])
+        self.udp.ack = True
+        self.butler.tick(at(23, 20))
+        self.assertFalse(self.udp.state["state"])
+        self.assertNotIn(MAC, Butler(self.path, self.udp).intents)
+        self.udp.state["state"] = True
+        self.butler.tick(at(23, 21))
+        self.assertTrue(self.udp.state["state"])
+        self.assertTrue(self.butler.matches(self.udp.state, MODES["NIGHT"]))
+
+    def test_confirmed_on_does_not_undo_later_off(self):
+        self.udp.state["state"] = False
+        self.butler.command("Bedroom", "ON", at(23, 17))
+        self.assertTrue(self.udp.state["state"])
+        self.butler = Butler(self.path, self.udp)
+        self.udp.state["state"] = False
+        before = len(self.udp.writes)
+        self.butler.tick(at(23, 18))
+        self.butler.tick(at(23, 19))
+        self.assertFalse(self.udp.state["state"])
+        self.assertEqual(before, len(self.udp.writes))
+
+    def test_disabled_schedule_does_not_force_off_again_after_delivery(self):
+        self.butler.configure(self.config | {"enabled": False})
+        self.butler.command("Bedroom", "OFF", at(23, 17))
+        self.udp.state.update(state=True, temp=4100, dimming=43)
+        before = len(self.udp.writes)
+        self.butler.tick(at(23, 18))
+        self.assertTrue(self.udp.state["state"])
+        self.assertEqual(4100, self.udp.state["temp"])
+        self.assertEqual(before, len(self.udp.writes))
+
+    def test_expired_override_cleanup_failure_never_blocks_reads_or_correction(self):
+        self.butler.command("Bedroom", "NIGHT", at(23, 17))
+        stored = self.path.read_text()
+        with patch.object(self.butler, "save", side_effect=OSError("disk full")):
+            for now in (at(6, 17, day=6), at(6, 18, day=6)):
+                self.udp.state.update(MODES["NIGHT"])
+                with patch.object(self.udp, "request", wraps=self.udp.request) as request:
+                    self.butler.tick(now)
+                self.assertTrue(any(call.args[1] == "getPilot" for call in request.call_args_list))
+                self.assertTrue(self.butler.matches(self.udp.state, MODES["REGULAR"]))
+                self.assertIn(MAC, self.butler.intents)  # Durable cleanup retry retained.
+                self.assertIn("could not be saved", self.butler.status()["errors"][MAC])
+                self.butler.pilot(BULB)
+                self.assertIn("could not be saved", self.butler.status()["errors"][MAC])
+                self.assertIsNotNone(self.butler.status()["persistenceError"])
+                self.assertEqual(stored, self.path.read_text())
+        self.butler.tick(at(6, 19, day=6))
+        self.assertNotIn(MAC, self.butler.intents)
+        self.assertNotIn(MAC, self.butler.holds)
+        self.assertIsNone(self.butler.status()["persistenceError"])
+        self.assertNotIn(MAC, self.butler.status()["errors"])
+        self.assertNotIn(MAC, Butler(self.path, self.udp).intents)
+
+    def test_expired_intent_does_not_resurrect_after_restart_with_failed_storage(self):
+        self.udp.state = None
+        self.butler.command("Bedroom", "NIGHT", at(23, 17))
+        self.assertTrue(self.butler.intents[MAC]["powerPending"])
+        for now in (at(6, 17, day=6), at(6, 18, day=6)):
+            restarted = Butler(self.path, self.udp)
+            self.udp.state = {"mac": MAC, "state": True, **MODES["NIGHT"]}
+            with patch.object(restarted, "save", side_effect=OSError("disk full")):
+                restarted.tick(now)
+            self.assertTrue(restarted.matches(self.udp.state, MODES["REGULAR"]))
+            self.assertNotIn("state", self.udp.writes[-1][2])
+        restarted = Butler(self.path, self.udp)
+        self.udp.state["state"] = False
+        before = len(self.udp.writes)
+        with patch.object(restarted, "save", side_effect=OSError("disk full")):
+            restarted.tick(at(6, 19, day=6))
+        self.assertFalse(self.udp.state["state"])
+        self.assertEqual(before, len(self.udp.writes))
+
+    def test_confirmed_off_cleanup_failure_does_not_block_wall_on(self):
+        # Initial request is durably queued, then verification cleanup hits a
+        # full disk. Readback must still retire its effective power forcing.
+        original = self.butler.save
+        saves = 0
+
+        def fail_cleanup():
+            nonlocal saves
+            saves += 1
+            if saves == 1:
+                return original()
+            raise OSError("disk full")
+
+        with patch.object(self.butler, "save", side_effect=fail_cleanup):
+            self.butler.command("Bedroom", "OFF", at(23, 17))
+        self.assertFalse(self.udp.state["state"])
+        self.assertFalse(self.butler.intents[MAC]["powerPending"])
+        self.assertNotIn(MAC, self.butler.status()["holds"])
+        self.udp.state.update(state=True, **MODES["REGULAR"])
+        with patch.object(self.butler, "save", side_effect=OSError("disk full")):
+            self.butler.tick(at(23, 18))
+        self.assertTrue(self.udp.state["state"])
+        self.assertTrue(self.butler.matches(self.udp.state, MODES["NIGHT"]))
+        self.assertNotIn(MAC, self.butler.status()["holds"])
+        self.assertIn("could not be saved", self.butler.status()["errors"][MAC])
+        self.butler.tick(at(23, 19))
+        self.assertNotIn(MAC, Butler(self.path, self.udp).intents)
+        self.assertIsNone(self.butler.persistence_error)
 
     def test_follow_resumes_but_never_turns_on(self):
         self.butler.command("Bedroom", "REGULAR", at(22))
