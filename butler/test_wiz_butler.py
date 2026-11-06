@@ -10,7 +10,7 @@ from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
-from wiz_butler import Butler, DEFAULT_CONFIG, MODES, handler, schedule, validate_config
+from wiz_butler import Butler, DEFAULT_CONFIG, MODES, Udp, handler, schedule, validate_config
 
 MAC = "aabbccddeeff"
 BULB = {"mac": MAC, "ip": "192.168.1.20", "room": "Bedroom"}
@@ -42,6 +42,19 @@ class FakeUdp:
             if method in ("setState", "setPilot") and "state" not in params:
                 self.state["state"] = True
         return {"success": self.ack}
+
+
+class DiscoveryTest(unittest.TestCase):
+    def test_malformed_lan_replies_do_not_abort_discovery(self):
+        replies = [
+            {"method": "getSystemConfig", "result": {"mac": 123}},
+            {"method": "getSystemConfig", "result": None},
+            {"method": "getSystemConfig", "result": {"mac": MAC.upper()}},
+        ]
+        with patch("wiz_butler.socket.socket") as socket_factory, patch("wiz_butler.time.monotonic", side_effect=[0, 0, 0, 0, 2]):
+            sock = socket_factory.return_value.__enter__.return_value
+            sock.recvfrom.side_effect = [(json.dumps(reply).encode(), (BULB["ip"], 38899)) for reply in replies]
+            self.assertEqual({MAC: BULB["ip"]}, Udp("192.168.1.255").discover())
 
 
 class ButlerTest(unittest.TestCase):

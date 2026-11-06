@@ -119,7 +119,10 @@ class Udp:
                     data, source = sock.recvfrom(8192)
                     reply = json.loads(data)
                     if isinstance(reply, dict) and reply.get("method") == "getSystemConfig":
-                        found[reply["result"]["mac"].lower()] = source[0]
+                        result = reply.get("result")
+                        mac = result.get("mac") if isinstance(result, dict) else None
+                        if isinstance(mac, str) and re.fullmatch(r"[0-9a-fA-F]{12}", mac):
+                            found[mac.lower()] = source[0]
                 except (socket.timeout, ValueError, KeyError, TypeError):
                     continue
         return found
