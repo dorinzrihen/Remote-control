@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 
+import emulator_discovery
+
 ROOT = Path(__file__).resolve().parents[1]
 AVD = "uniremote-pixel-8a"
 PACKAGE = "com.dorin.uniremote.preview"
@@ -232,10 +234,34 @@ class Device:
             serial = serial or self.launch()
         self.boot(serial)
         self.adb_run("-s", serial, "install", "-r", ROOT / "app/build/outputs/apk/debug/app-debug.apk", timeout=120)
+        self.discovery_bridge(serial)
         result = self.adb_run("-s", serial, "shell", "am", "start", "-W", "-n", f"{PACKAGE}/{ACTIVITY}")
         if "Error:" in result.stdout or "Status: ok" not in result.stdout:
             raise Error(f"Preview failed to launch:\n{result.stdout}")
         print(f"Preview open on visible Pixel 8a: {AVD} ({serial}). Data/settings retained.", flush=True)
+
+    def discovery_bridge(self, serial):
+        state_path = self.local / "discovery.json"
+        state = emulator_discovery.read_state(state_path)
+        if not state:
+            kwargs = {"start_new_session": True} if self.system != "Windows" else {
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+            with (self.local / "discovery.log").open("ab") as log:
+                process = subprocess.Popen([sys.executable, str(ROOT / "tools/emulator_discovery.py"),
+                                            "--state", str(state_path)], cwd=ROOT,
+                                           stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, **kwargs)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                state = emulator_discovery.read_state(state_path)
+                if state:
+                    break
+                if process.poll() is not None:
+                    raise Error(f"Host TV discovery bridge failed; see {self.local / 'discovery.log'}.")
+                time.sleep(0.1)
+            if not state:
+                raise Error("Host TV discovery bridge did not start in 10s.")
+        self.adb_run("-s", serial, "reverse", f"tcp:{emulator_discovery.DEVICE_PORT}", f'tcp:{state["port"]}')
+        print("TV discovery uses the host LAN via a loopback-only development bridge.", flush=True)
 
 
 @contextlib.contextmanager
@@ -274,8 +300,14 @@ def main():
                 device.dev()
             else:
                 serial = device.ours()
-                if action == "stop" and serial:
-                    device.stop(serial)
+                if action == "stop":
+                    if serial:
+                        device.stop(serial)
+                    elif device.processes():
+                        raise Error(f"{AVD} process exists but ADB is not ready; close in Device Manager.")
+                    else:
+                        print(f"{AVD}: stopped (saved data retained)")
+                    emulator_discovery.stop_bridge(device.local / "discovery.json")
                 elif serial:
                     print(f"{AVD}: {serial}, {'headless' if device.headless() else 'windowed'}")
                 elif device.processes():

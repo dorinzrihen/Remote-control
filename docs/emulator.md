@@ -19,6 +19,25 @@ Other emulators and USB phones are never installation/stop targets. No fixture
 data, app clearing, device wiping, automatic watching, publication or light commands.
 Build failures stop before installation. Emulator startup/boot waits are bounded.
 
+### Real TV discovery
+
+The emulator has real unicast access to the home LAN, but its virtual router
+does not forward SSDP multicast. That can make TV scans empty even while a real
+TV answers discovery from the host computer. `dev` starts a small **read-only TV
+discovery bridge**, bound only to host loopback and forwarded only into this AVD
+with `adb reverse`. Each LG/Samsung scan makes fresh, real SSDP queries from the
+host; no TV IP or synthetic device list is hardcoded. Connection/pairing still
+goes directly from Android to the real TV after you choose Connect. The helper
+never pairs or sends power, volume, input or other remote-control commands.
+
+This bridge exists only in debug emulator builds; debug phones and release apps
+keep native discovery. Android TV/Xiaomi mDNS discovery is unchanged. Without
+the helper (for example, launching from Android Studio alone), the debug app
+falls back to native discovery. `stop` also stops the bridge; rerunning `dev`
+reuses it, so there is no extra command, installed service or viewer. The host
+must itself be on the TV's LAN. This makes the emulator useful for real-TV
+development, but does not validate a physical phone's multicast/Wi-Fi behavior.
+
 The older `uniremote-preview` Pixel 7 screenshot-test device is left untouched.
 Do not run fixture/reset screenshot scripts against the everyday device if you
 want to keep its app settings. A fresh app may first show TV setup: choose **Done**,
@@ -76,4 +95,4 @@ SDK errors explain the missing component; emulator logs are in
 Verified live on Ubuntu; macOS/Windows discovery and command selection have
 unit tests but have not been run live there.
 
-Helper tests: `python3 -m unittest discover -s tools -p test_emulator.py -v`.
+Helper tests: `python3 -m unittest discover -s tools -p 'test_emulator*.py' -v`.

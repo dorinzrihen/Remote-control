@@ -22,14 +22,14 @@ object Discovery {
 
     /** Find LG webOS TVs with an SSDP M-SEARCH. */
     suspend fun findLgTvs(ctx: Context, timeoutMs: Long = 3000): List<FoundDevice> =
-        ssdp(ctx, "urn:lge-com:service:webos-second-screen:1", timeoutMs) { text, ip ->
+        EmulatorDiscovery.find("lg") ?: ssdp(ctx, "urn:lge-com:service:webos-second-screen:1", timeoutMs) { text, ip ->
             if (!text.contains("webos", ignoreCase = true) && !text.contains("LGE", ignoreCase = true)) null
             else FoundDevice(ip, header(text, "SERVER")?.take(40) ?: "LG webOS TV")
         }
 
     /** Find Samsung Tizen TVs: SSDP for the remote-control receiver, then the name from the REST API on port 8001. */
     suspend fun findSamsungTvs(ctx: Context, timeoutMs: Long = 3000): List<FoundDevice> {
-        val raw = ssdp(ctx, "urn:samsung.com:device:RemoteControlReceiver:1", timeoutMs) { text, ip ->
+        val raw = EmulatorDiscovery.find("samsung") ?: ssdp(ctx, "urn:samsung.com:device:RemoteControlReceiver:1", timeoutMs) { text, ip ->
             if (!text.contains("samsung", ignoreCase = true)) null else FoundDevice(ip, "Samsung TV")
         }
         return withContext(Dispatchers.IO) {

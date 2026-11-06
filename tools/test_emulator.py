@@ -92,7 +92,7 @@ class EmulatorTests(unittest.TestCase):
 
     def configured_dev(self, headless=False):
         d = self.device()
-        for method in ("java", "ensure_avd", "boot", "stop"):
+        for method in ("java", "ensure_avd", "boot", "stop", "discovery_bridge"):
             setattr(d, method, Mock())
         d.ours = Mock(return_value="emulator-5562")
         d.headless = Mock(return_value=headless)
@@ -194,6 +194,15 @@ class EmulatorTests(unittest.TestCase):
         with patch.object(e, "run", return_value=result(f'qemu.exe -avd {e.AVD} -gpu swiftshader')) as run:
             self.assertEqual(len(d.processes()), 1)
         self.assertEqual(run.call_args.args[0][0], "powershell.exe")
+
+    def test_existing_discovery_bridge_reused_and_forwarded_only_to_own_serial(self):
+        d = self.device()
+        d.adb_run = Mock(return_value=result())
+        state = {"port": 29123, "key": "s" * 64}
+        with patch.object(e.emulator_discovery, "read_state", return_value=state), patch.object(e.subprocess, "Popen") as popen:
+            d.discovery_bridge("emulator-5562")
+        popen.assert_not_called()
+        d.adb_run.assert_called_once_with("-s", "emulator-5562", "reverse", "tcp:18765", "tcp:29123")
 
     def test_existing_avd_is_not_recreated(self):
         d = self.device()
