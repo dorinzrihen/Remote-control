@@ -1,6 +1,8 @@
 package com.dorin.remote.wiz
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -48,14 +50,23 @@ object ButlerClient {
         val base = url.trim().trimEnd('/').toHttpUrl()
         val request = Request.Builder().url(base.newBuilder().encodedPath(path).build())
         if (body != null) request.post(oneShotJson(body))
-        http.newCall(request.build()).execute().use { response ->
-            val result = JSONObject(response.body?.string() ?: "{}")
-            if (response.code == 409 && path == "/v1/config") throw TimetableConflict()
-            // A timeout/server error cannot establish that a mutation had no effect.
-            if (response.code == 408 || response.code >= 500) throw IOException(result.optString("error", "Butler HTTP ${response.code}"))
-            if (!response.isSuccessful) throw ButlerRequestRejected(result.optString("error", "Butler HTTP ${response.code}"))
-            result
+        for (attempt in 0..1) {
+            try {
+                http.newCall(request.build()).execute().use { response ->
+                    val result = JSONObject(response.body?.string() ?: "{}")
+                    if (response.code == 409 && path == "/v1/config") throw TimetableConflict()
+                    // A timeout/server error cannot establish that a mutation had no effect.
+                    if (response.code == 408 || response.code >= 500) throw IOException(result.optString("error", "Butler HTTP ${response.code}"))
+                    if (!response.isSuccessful) throw ButlerRequestRejected(result.optString("error", "Butler HTTP ${response.code}"))
+                    return@withContext result
+                }
+            } catch (failure: IOException) {
+                currentCoroutineContext().ensureActive()
+                // Only cached, read-only GETs can be repeated. Never replay any POST.
+                if (body != null || attempt == 1) throw failure
+            }
         }
+        error("Status retry exhausted")
     }
 
 }

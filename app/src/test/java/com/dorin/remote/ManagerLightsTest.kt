@@ -209,6 +209,36 @@ class ManagerLightsTest {
         assertFalse(lights.loaded.value)
     }
 
+    @Test fun readOnlyStatusRecoversFromDisconnectedConnection() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        server.enqueue(MockResponse().setBody(status().toString()))
+        server.start()
+        try {
+            val result = ButlerClient.exchange(server.url("/").toString(), "/v1/status")
+            assertTrue(result.has("config"))
+            assertEquals(2, server.requestCount)
+            repeat(2) {
+                val request = server.takeRequest()
+                assertEquals("GET", request.method)
+                assertEquals("/v1/status", request.path)
+            }
+        } finally { server.shutdown() }
+    }
+
+    @Test fun readOnlyStatusRecoveryIsBounded() = runBlocking {
+        val server = MockWebServer()
+        repeat(2) { server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST)) }
+        server.start()
+        try {
+            try {
+                ButlerClient.exchange(server.url("/").toString(), "/v1/status")
+                fail("Expected unavailable status after two attempts")
+            } catch (_: java.io.IOException) { }
+            assertEquals(2, server.requestCount)
+        } finally { server.shutdown() }
+    }
+
     @Test fun httpPostDisconnectDoesNotAutomaticallyResendCommand() = runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
