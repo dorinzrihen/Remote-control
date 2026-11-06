@@ -1,38 +1,48 @@
 # Releasing UniRemote
 
-## What is checked in
+## Release with one click
 
-The Gradle build and Android self-updater are checked in. There are currently
-**no GitHub Actions workflows**: neither merging a PR nor creating a tag builds
-or publishes an APK automatically. The existing process is manual.
+GitHub → **Actions** → **Release** → **Run workflow**. All fields are optional:
 
-## Manual Android release
+- **notes**: what changed, shown in the app's update dialog. Empty uses the
+  list of commits since the last release.
+- **version**: e.g. `2.0`. Empty bumps the minor number (1.6 → 1.7).
+- **dry run**: build and check everything, publish nothing.
 
-1. Merge the desired changes. Increase both `versionCode` and `versionName` in
-   `app/build.gradle.kts`; use the same version for the GitHub release tag.
-2. On a machine with JDK 17 and the Android SDK, run:
+`.github/workflows/release.yml` then takes `main`, raises `versionCode` and
+`versionName` in `app/build.gradle.kts`, runs the unit tests, builds the
+release APK and checks it is signed with the UniRemote key. Only then does it
+commit "Version 1.7" to `main`, tag it `v1.7` and create the GitHub Release
+"UniRemote 1.7" with `UniRemote.apk` attached.
 
-   ```sh
-   ./gradlew testReleaseUnitTest assembleRelease
-   cp app/build/outputs/apk/release/app-release.apk UniRemote.apk
-   ```
+It stops without changing anything if there are no new commits since the last
+release, the version already exists, the tests fail, or the APK is not signed
+with the release key.
 
-3. **Verify signing before publishing.** The build uses the private
-   `keystore/uniremote.jks` if present, otherwise silently falls back to a debug
-   key—even for `assembleRelease`. Updating an installed Android app requires
-   the same signing certificate as that app. Do not publish a debug-signed APK
-   as an update to a production-signed installation. The private keystore is
-   deliberately excluded from git; it is not present on this development host.
-4. Publish a normal GitHub Release with the APK asset. For example, after choosing
-   and setting the next version (replace `X.Y`):
+## Who can release
 
-   ```sh
-   gh release create vX.Y UniRemote.apk --repo dorinzrihen/Remote-control \
-     --title "UniRemote X.Y" --notes "Release notes"
-   ```
+Anyone with write access to `dorinzrihen/Remote-control` can run the workflow.
+Pull requests from forks cannot run it and never see the signing key.
 
-   Use the upstream repository: the installed app checks that specific repo,
-   not a contributor's fork. This requires upstream release permissions.
+The signing key `keystore/uniremote.jks` is not in git. The workflow gets it
+from the `ANDROID_KEYSTORE_BASE64` secret in the `release` environment, which
+only `main` can use.
+
+## Manual release
+
+On a machine with JDK 17, the Android SDK and `keystore/uniremote.jks`:
+
+```sh
+./gradlew testReleaseUnitTest assembleRelease
+cp app/build/outputs/apk/release/app-release.apk UniRemote.apk
+gh release create vX.Y UniRemote.apk --repo dorinzrihen/Remote-control \
+  --title "UniRemote X.Y" --notes "Release notes"
+```
+
+Without the keystore the build silently falls back to a debug key, even for
+`assembleRelease`. Installed phones refuse an update signed with a different
+key, so check with `apksigner verify --print-certs` that the SHA-256 digest is
+`eee4fda2f81c27135c2df40ea57f2e656bd377798ebc509e1e815a14059587ca`.
 
 ## What the installed app does
 

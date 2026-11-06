@@ -36,14 +36,9 @@ After that the app checks GitHub Releases on every launch and offers to download
 - App icons arrive from the TV after the first connection and are cached on the phone.
 
 ## Build
-The [release guide](docs/releases.md) explains signing, manual GitHub publishing,
-and how installed phones find updates. There is no automatic release workflow.
-
 ```
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ./gradlew assembleRelease
-cp app/build/outputs/apk/release/app-release.apk UniRemote.apk
-gh release create v1.5 UniRemote.apk --title "UniRemote 1.5" --notes "what changed"
 ```
-Bump `versionCode` / `versionName` in `app/build.gradle.kts` before each release; the in-app updater compares `versionName` with the release tag.
+To release: GitHub → **Actions** → **Release** → **Run workflow**. It bumps the version, builds, signs and publishes; phones get the update on next launch. See the [release guide](docs/releases.md).
 Protocol unit tests (compared against the official Python protobuf library): `./gradlew testReleaseUnitTest`
