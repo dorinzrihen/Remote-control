@@ -16,6 +16,23 @@ from wiz_butler import handler
 
 
 class BonjourTest(unittest.TestCase):
+    def test_registration_uses_macos_system_library_and_releases_reference(self):
+        bonjour = Bonjour("10.100.102.19", 8788)
+        bonjour.stop.set()
+        with patch("bonjour.ctypes.CDLL") as load:
+            library = load.return_value
+            def register(reference, _flags, _interface, name, kind, _domain, _host, port, length, record, callback, _context):
+                reference._obj.value = 123
+                self.assertEqual(b"Butler Lights", name)
+                self.assertEqual(b"_uniremote._tcp", kind)
+                self.assertEqual(len(record), length)
+                self.assertEqual(txt_record("10.100.102.19"), record)
+                return 0
+            library.DNSServiceRegister.side_effect = register
+            bonjour.register()
+            load.assert_called_once_with("/usr/lib/libSystem.B.dylib")
+            library.DNSServiceRefDeallocate.assert_called_once()
+
     def test_metadata_contains_protocol_and_bound_address_only(self):
         record = txt_record("10.100.102.19")
         entries = []

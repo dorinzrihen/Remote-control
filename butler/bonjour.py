@@ -42,7 +42,9 @@ class Bonjour:
         # exits (even on a crash), macOS removes the service; no orphan helper.
         ref = ctypes.c_void_p()
         try:
-            lib = ctypes.CDLL("/usr/lib/libdns_sd.dylib")
+            # DNS-SD symbols are exported by libSystem on current macOS; a
+            # standalone libdns_sd.dylib is not present on every installation.
+            lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
             callback_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32,
                                            ctypes.c_int32, ctypes.c_char_p,
                                            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p)
@@ -64,6 +66,7 @@ class Bonjour:
             lib.DNSServiceProcessResult.argtypes = [ctypes.c_void_p]
             lib.DNSServiceProcessResult.restype = ctypes.c_int32
             lib.DNSServiceRefDeallocate.argtypes = [ctypes.c_void_p]
+            lib.DNSServiceRefDeallocate.restype = None
             record = txt_record(self.address)
             error = lib.DNSServiceRegister(ctypes.byref(ref), 0, 0, b"Butler Lights",
                                           SERVICE_TYPE.encode(), None, None,
