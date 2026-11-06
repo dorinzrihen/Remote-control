@@ -22,18 +22,44 @@ timezone data. Keep the computer awake and connected to the bulb LAN.
    token in cleartext: use a trusted, isolated home LAN, or an HTTPS reverse proxy
    with a normally trusted certificate. Limit the firewall to the phone/home
    subnet. WiZ UDP itself is unauthenticated.
-4. In Android, open **Quick actions → Bulbs → Lighting manager**, enter the URL
-   (for example `http://192.168.1.10:8788`) and token, then **Load**. This adopts
-   the manager's bulbs/settings without changing any lights. Old phone-saved bulbs
-   are **not** imported automatically.
-5. Use **Find new bulbs → Blink → room → Add** to register bulbs explicitly.
+4. In the updated Android app, open **Quick actions → Bulbs** on the same Wi-Fi.
+   The macOS manager appears automatically through Bonjour. For first-time pairing,
+   run `python3 butler/wiz_butler.py --pair` on the Mac (use the same `--state`
+   path if customized). A native Mac dialog shows a six-digit code. Enter it on
+   the phone and tap **Pair**. It expires in five minutes, is single-use and locks
+   after five wrong attempts. Pairing is disabled until this local command runs;
+   no restart or administrator access is needed. The long secret is transferred
+   without manual entry and is never included in discovery metadata.
+   Existing paired phones reconnect automatically; a changed discovered address
+   must prove possession of the saved secret before Android sends credentials.
+   Android v1.7 does **not** have discovery/pairing: it needs an app update.
+   **Advanced connection** retains manual URL/token entry for other platforms
+   or networks blocking multicast. Loading/pairing adopts the manager's existing
+   bulbs/settings without changing lights; old phone-saved bulbs are not imported.
+5. Open **Manage bulbs → Find new bulbs → Blink → room → Add** to register bulbs.
    Hold **Remove** to delete one from the manager; removal does not turn it off.
    These operations work with the timetable enabled or disabled.
-6. Choose Night/Day times, home IANA timezone and polling interval, then **Save**.
-   **Enable manager timetable** changes only automatic scheduling, not the
+6. Open **Edit timetable**, choose Night/Day times, home IANA timezone and polling
+   interval, then **Save timetable**. The timetable switch changes only scheduling, not the
    connection or ownership. Manual commands/status still require the manager
    when the timetable is off. Save preserves bulbs and manual holds and sends no
-   light command. After an unconfirmed Save, Load status before retrying.
+    light command. After an unconfirmed Save, reconnect before retrying.
+
+### Discovery scope and security
+
+macOS advertises `Butler Lights._uniremote._tcp.local.` with its actual HTTP port
+and non-secret TXT metadata (`api=1`, `pairing=code`, bound `address` when specific).
+It uses the system DNS-SD library, adds no Python package dependency, retries
+registration failures, and removes the advertisement when the process exits.
+Loopback-only services are not advertised. Keep the configured LAN address valid
+(for example with a router DHCP reservation); discovery does not change the bind.
+Android uses NSD only while Bulbs is open, holds/releases a multicast lock, and
+resolves managers serially. It does not broadcast WiZ commands.
+
+mDNS is local-network discovery, not authentication or encryption. Pairing and
+the existing bearer-token API use HTTP; use a trusted home LAN. The short code
+does not defend against an active local-network attacker intercepting HTTP.
+Discovery does not traverse Tailscale or Wi-Fi client isolation automatically.
 
 State is atomically saved at `~/.local/state/uniremote-wiz/state.json` (0600),
 including bulb identities, timetable and manual holds. Updating the existing Mac
@@ -79,7 +105,13 @@ Older Android apps and other controllers can bypass its bookkeeping.
 
 ## HTTP contract
 
-All endpoints require `Authorization: Bearer <token>`; POST bodies are JSON.
+Control/status endpoints require `Authorization: Bearer <token>`; POST bodies are JSON.
+Two onboarding endpoints are unauthenticated and cannot control bulbs:
+`POST /v1/pair` accepts `{code}` only during explicit local activation and returns
+`{token}` once; `POST /v1/identity` accepts a random 64-hex-character `{nonce}` and
+returns `{proof}` (HMAC-SHA256 of `uniremote-manager-v1:<nonce>` using the token).
+Identity verification prevents blindly sending saved secrets to arbitrary mDNS
+advertisements. Every response has `Cache-Control: no-store`.
 
 | Endpoint | Purpose |
 |---|---|
@@ -149,10 +181,11 @@ templates are also provided (`uniremote-wiz.service.example` and the env example
 Only the explicit `--install` command installs/loads the Mac login job. Running
 the Python manager alone does not install a service or change sleep settings.
 
-Before changing manager URLs, disable and Save the old manager's timetable, then
+Before deliberately switching to a different manager, disable and Save the old manager's timetable, then
 stop it. To move its state, copy `~/.local/state/uniremote-wiz/` while both managers
 are stopped; never leave two schedulers running. A fresh state file starts disabled;
-an upgrade reuses the stored enabled setting.
+an upgrade reuses the stored enabled setting. Rediscovering the same authenticated
+manager at a changed address is not a manager switch and preserves its timetable.
 
 ## Validation
 

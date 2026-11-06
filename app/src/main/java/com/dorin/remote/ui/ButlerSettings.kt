@@ -34,6 +34,13 @@ fun ButlerSettings(vm: RemoteViewModel) {
     val busy by vm.butlerBusy.collectAsState()
     val status by vm.butlerStatus.collectAsState()
     val settings by vm.butlerSettings.collectAsState()
+    val loaded by vm.lights.loaded.collectAsState()
+    val managers by vm.foundButlers.collectAsState()
+    val selected by vm.selectedButlerUrl.collectAsState()
+    val discoveryStatus by vm.butlerDiscoveryStatus.collectAsState()
+    var showConnection by remember { mutableStateOf(false) }
+    var showTimetable by remember { mutableStateOf(false) }
+    var code by remember { mutableStateOf("") }
     var url by remember { mutableStateOf(vm.prefs.butlerUrl) }
     var token by remember { mutableStateOf(vm.prefs.butlerToken) }
     var enabled by remember { mutableStateOf(active) }
@@ -44,6 +51,7 @@ fun ButlerSettings(vm: RemoteViewModel) {
     LaunchedEffect(Unit) {
         if (vm.prefs.butlerUrl.isNotBlank()) vm.loadButler(vm.prefs.butlerUrl, vm.prefs.butlerToken)
     }
+    LaunchedEffect(Unit) { vm.discoverButlers() }
     LaunchedEffect(settings) {
         settings?.let {
             enabled = it.getBoolean("enabled")
@@ -53,29 +61,52 @@ fun ButlerSettings(vm: RemoteViewModel) {
     }
     Column(Modifier.fillMaxWidth().background(Surface2, RoundedCornerShape(14.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Lighting manager", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Text("The manager alone discovers, reads and controls bulbs, even when its timetable is disabled. Requires the service on an always-on computer; not native WiZ Rhythms.", color = TextDim, fontSize = 12.sp)
-        Text("Manager timetable: ${if (active) "enabled" else "disabled"}. $status", color = TextDim, fontSize = 12.sp)
-        OutlinedTextField(url, { url = it }, label = { Text("Butler URL, e.g. http://192.168.1.10:8788") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(token, { token = it }, label = { Text("Butler token") }, singleLine = true, enabled = !busy,
-            visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Enable manager timetable", color = TextMain, modifier = Modifier.weight(1f))
-            Switch(enabled, { enabled = it }, enabled = !busy)
+        Text(status, color = TextDim, fontSize = 12.sp)
+        if (!loaded) {
+            Text(discoveryStatus, color = TextDim, fontSize = 12.sp)
+            managers.forEach { manager ->
+                PillButton(manager.name, modifier = Modifier.fillMaxWidth(), color = if (selected == manager.url) Accent else Bg,
+                    contentColor = if (selected == manager.url) Bg else TextMain) { vm.selectedButlerUrl.value = manager.url }
+            }
+            if (selected.isNotBlank()) {
+                OutlinedTextField(code, { code = it.filter { c -> c in '0'..'9' }.take(6) }, label = { Text("Pairing code shown on Mac") },
+                    singleLine = true, enabled = !busy, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword), modifier = Modifier.fillMaxWidth())
+                PillButton(if (busy) "Connecting…" else "Pair", modifier = Modifier.fillMaxWidth(), color = Accent, contentColor = Bg) {
+                    if (!busy) vm.pairButler(selected, code)
+                }
+            }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(night, { night = it }, label = { Text("Night HH:MM") }, singleLine = true, enabled = !busy, modifier = Modifier.weight(1f))
-            OutlinedTextField(morning, { morning = it }, label = { Text("Day HH:MM") }, singleLine = true, enabled = !busy, modifier = Modifier.weight(1f))
+        if (loaded) {
+            Text(if (active) "Night $night · Day $morning" else "Timetable off", color = TextDim, fontSize = 12.sp)
+            PillButton(if (showTimetable) "Hide timetable" else "Edit timetable") { showTimetable = !showTimetable }
         }
-        OutlinedTextField(timezone, { timezone = it }, label = { Text("Home timezone (e.g. Asia/Jerusalem)") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(pollSeconds, { pollSeconds = it }, label = { Text("Poll every X seconds (1–300)") }, singleLine = true, enabled = !busy,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-        Text("The manager polls bulbs every 1 second by default; this screen also refreshes manager status every second. Timetable boundaries wake the manager sooner.", color = TextDim, fontSize = 12.sp)
-        Text("Regular: 100%, 6500K. Night: 20%, 2700K. Changes apply to bulbs that are on and to detected wall-switch On events. Manual presets last until the next timetable boundary; Follow timetable resumes sooner. Off bulbs stay off.", color = TextDim, fontSize = 12.sp)
-        Text("Load adopts the manager’s bulbs and settings. Save changes only the timetable, never the bulb list, and sends no light command. Old phone-saved bulbs are not imported automatically; use Find new bulbs and Add explicitly. No direct UDP fallback.", color = TextDim, fontSize = 12.sp)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PillButton(if (busy) "Working…" else "Load", modifier = Modifier.weight(1f)) { if (!busy) vm.loadButler(url, token) }
-            PillButton("Save", modifier = Modifier.weight(1f), color = Accent, contentColor = Bg) {
-                if (!busy) vm.saveButler(url, token, enabled, night, morning, timezone, pollSeconds)
+        if (loaded && showTimetable) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Timetable", color = TextMain, modifier = Modifier.weight(1f))
+                Switch(enabled, { enabled = it }, enabled = !busy)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(night, { night = it }, label = { Text("Night HH:MM") }, singleLine = true, enabled = !busy, modifier = Modifier.weight(1f))
+                OutlinedTextField(morning, { morning = it }, label = { Text("Day HH:MM") }, singleLine = true, enabled = !busy, modifier = Modifier.weight(1f))
+            }
+            OutlinedTextField(timezone, { timezone = it }, label = { Text("Timezone") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(pollSeconds, { pollSeconds = it }, label = { Text("Poll interval (seconds)") }, singleLine = true, enabled = !busy,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+            Text("Regular: 100% cool · Night: 20% warm. Off bulbs stay off.", color = TextDim, fontSize = 12.sp)
+            PillButton(if (busy) "Saving…" else "Save timetable", modifier = Modifier.fillMaxWidth(), color = Accent, contentColor = Bg) {
+                if (!busy) vm.saveButler(vm.prefs.butlerUrl, vm.prefs.butlerToken, enabled, night, morning, timezone, pollSeconds)
+            }
+        }
+        PillButton(if (showConnection) "Hide connection" else "Advanced connection") {
+            if (!showConnection) { url = vm.prefs.butlerUrl; token = vm.prefs.butlerToken }
+            showConnection = !showConnection
+        }
+        if (showConnection) {
+            OutlinedTextField(url, { url = it }, label = { Text("Manager URL") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(token, { token = it }, label = { Text("Token") }, singleLine = true, enabled = !busy,
+                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+            PillButton(if (busy) "Connecting…" else "Connect", modifier = Modifier.fillMaxWidth()) {
+                if (!busy) vm.loadButler(url, token)
             }
         }
     }

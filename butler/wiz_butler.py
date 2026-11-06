@@ -2,6 +2,7 @@
 """Authoritative LAN WiZ manager. Python 3.11+, standard library only."""
 
 import argparse
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -11,11 +12,16 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import signal
+import subprocess
 import threading
 import time
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
+
+from bonjour import Bonjour
+from pairing import Pairing
 
 MODES = {"REGULAR": {"dimming": 100, "temp": 6500}, "NIGHT": {"dimming": 20, "temp": 2700}}
 DEFAULT_CONFIG = {"enabled": False, "night": "21:00", "morning": "06:00", "timezone": "Asia/Jerusalem", "pollSeconds": 1, "bulbs": []}
@@ -418,7 +424,7 @@ class Butler:
                     "lastPoll": self.last_poll, "statusAt": time.time(), "native": False}
 
 
-def handler(butler, token):
+def handler(butler, token, pairing=None):
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
             super().setup()
@@ -429,6 +435,7 @@ def handler(butler, token):
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
 
@@ -447,7 +454,8 @@ def handler(butler, token):
             self.respond(200, butler.status())
 
         def do_POST(self):
-            if not self.authorized():
+            public = self.path in ("/v1/pair", "/v1/identity")
+            if not public and not self.authorized():
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -456,7 +464,18 @@ def handler(butler, token):
                 value = json.loads(self.rfile.read(length))
                 if not isinstance(value, dict):
                     raise ValueError("Expected JSON object")
-                if self.path == "/v1/config":
+                if self.path == "/v1/identity":
+                    nonce = value.get("nonce", "")
+                    if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{64}", nonce):
+                        raise ValueError("Invalid nonce")
+                    proof = hmac.new(token.encode(), ("uniremote-manager-v1:" + nonce).encode(), hashlib.sha256).hexdigest()
+                    self.respond(200, {"proof": proof})
+                elif self.path == "/v1/pair":
+                    if pairing is not None and pairing.redeem(value.get("code")):
+                        self.respond(200, {"token": token})
+                    else:
+                        self.respond(403, {"error": "Pairing unavailable or code incorrect. Open a new code on the Mac."})
+                elif self.path == "/v1/config":
                     butler.configure(value)
                     self.respond(200, butler.status())
                 elif self.path == "/v1/room":
@@ -489,13 +508,24 @@ def main():
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--state", type=Path, default=Path.home() / ".local/state/uniremote-wiz/state.json")
     parser.add_argument("--broadcast", default="255.255.255.255", help="LAN broadcast for DHCP rediscovery")
+    parser.add_argument("--pair", action="store_true", help="Show a five-minute pairing code locally on the Mac; no service restart")
     args = parser.parse_args()
+    pairing = Pairing(args.state.with_name("pairing.json"))
+    if args.pair:
+        # Activation is a local CLI action, never an unauthenticated HTTP action.
+        # Display through macOS itself, not stdout/logs or chat.
+        code = pairing.enable()
+        script = f'display dialog "Enter this code in UniRemote on your phone:\\n\\n{code}\\n\\nExpires in 5 minutes. One use only." with title "Butler Lights pairing" buttons {{"Done"}} default button "Done"'
+        subprocess.run(["/usr/bin/osascript", "-"], input=script, text=True, check=True, stdout=subprocess.DEVNULL)
+        return
     token = os.environ.get("UNIREMOTE_TOKEN", "")
     if len(token) < 32 or not token.isascii():
         parser.error("Set UNIREMOTE_TOKEN to an ASCII secret of at least 32 characters")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     butler = Butler(args.state, Udp(args.broadcast))
-    server = ThreadingHTTPServer((args.listen, args.port), handler(butler, token))
+    server = ThreadingHTTPServer((args.listen, args.port), handler(butler, token, pairing))
+    bonjour = Bonjour(args.listen, server.server_port)
+    bonjour.start()
     stop = threading.Event()
 
     def poll():
@@ -511,7 +541,11 @@ def main():
     worker = threading.Thread(target=poll, daemon=True)
     worker.start()
     logging.info("Listening on %s:%d; timetable enabled=%s", args.listen, args.port, butler.config["enabled"])
+    def terminate(_signal, _frame):
+        raise SystemExit(0)
+
     try:
+        signal.signal(signal.SIGTERM, terminate)
         server.serve_forever()
     except KeyboardInterrupt:
         pass
@@ -519,6 +553,7 @@ def main():
         stop.set()
         butler.changed.set()
         server.server_close()
+        bonjour.close()
 
 
 if __name__ == "__main__":

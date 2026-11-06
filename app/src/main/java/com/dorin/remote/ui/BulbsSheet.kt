@@ -51,6 +51,7 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     val loaded by vm.lights.loaded.collectAsState()
     val error by vm.lights.error.collectAsState()
     val observationAges by vm.lights.observationAges.collectAsState()
+    var manageBulbs by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         while (true) {
             vm.pollBulbs()
@@ -62,9 +63,8 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Surface1, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Bulbs", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            if (!loaded) Text("Manager status not loaded. Connect below; no phone-owned bulbs or direct WiZ fallback are used.", color = TextDim, fontSize = 13.sp)
             error?.let { Text(it, color = Danger, fontSize = 12.sp) }
-            if (loaded && bulbs.isEmpty()) Text("The manager has no bulbs yet. Set up in the WiZ app, then Find new bulbs to discover through the manager.", color = TextDim, fontSize = 13.sp)
+            if (loaded && bulbs.isEmpty()) Text("No bulbs yet. Tap Manage bulbs to add one.", color = TextDim, fontSize = 13.sp)
 
             // ---- Rooms ----
             bulbs.map { it.room }.distinct().forEach { room ->
@@ -94,51 +94,54 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
                             }
                         }
                     }
-                    if (butlerEnabled) PillButton("Follow timetable (leave off bulbs off)", modifier = Modifier.fillMaxWidth()) { vm.followTimetable(room) }
+                    if (butlerEnabled) PillButton("Follow timetable", modifier = Modifier.fillMaxWidth()) { vm.followTimetable(room) }
                 }
             }
-            if (bulbs.isNotEmpty()) Text("Regular: 100% cool white  ·  Night: 20% warm", color = TextDim, fontSize = 11.sp)
-
             ButlerSettings(vm)
 
-            // ---- Saved bulbs ----
-            if (bulbs.isNotEmpty()) Text("Saved bulbs", color = TextDim, fontSize = 13.sp)
-            bulbs.forEach { b ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("${b.room}  ·  …${b.mac.takeLast(4)}" + if (pilots[b.mac] == null) "  ·  not reachable" else "", color = TextMain, fontSize = 13.sp)
-                        systemConfigs[b.mac]?.let { Text("${it.moduleName} · firmware ${it.fwVersion}", color = TextDim, fontSize = 11.sp) }
-                        observationAges[b.mac]?.let { Text("Manager last observed ${it}s ago", color = TextDim, fontSize = 11.sp) }
+            if (loaded) {
+                PillButton(if (manageBulbs) "Done managing bulbs" else "Manage bulbs", modifier = Modifier.fillMaxWidth()) { manageBulbs = !manageBulbs }
+                if (manageBulbs) {
+                    // ---- Saved bulbs ----
+                    if (bulbs.isNotEmpty()) Text("Saved bulbs", color = TextDim, fontSize = 13.sp)
+                    bulbs.forEach { b ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("${b.room}  ·  …${b.mac.takeLast(4)}" + if (pilots[b.mac] == null) "  ·  not reachable" else "", color = TextMain, fontSize = 13.sp)
+                                systemConfigs[b.mac]?.let { Text("${it.moduleName} · firmware ${it.fwVersion}", color = TextDim, fontSize = 11.sp) }
+                                observationAges[b.mac]?.let { Text("Manager last observed ${it}s ago", color = TextDim, fontSize = 11.sp) }
+                            }
+                            PillButton("Blink") { vm.blinkBulb(b.mac) }
+                            Spacer(Modifier.width(6.dp))
+                            PillButton("Remove", contentColor = Danger, onLongPress = { vm.removeBulb(b.mac) }) {
+                                vm.messages.tryEmit("Hold Remove to delete this bulb from the manager")
+                            }
+                        }
                     }
-                    PillButton("Blink") { vm.blinkBulb(b.mac) }
-                    Spacer(Modifier.width(6.dp))
-                    PillButton("Remove", contentColor = Danger, onLongPress = { vm.removeBulb(b.mac) }) {
-                        vm.messages.tryEmit("Hold Remove to delete this bulb from the manager")
-                    }
-                }
-            }
 
-            // ---- Add bulbs ----
-            PillButton(if (searching) "Searching…" else "Find new bulbs", modifier = Modifier.fillMaxWidth(), color = Accent, contentColor = Bg) {
-                if (!searching) vm.findBulbs()
-            }
-            newBulbs.forEach { (ip, p) ->
-                key(ip) {
-                    var room by remember { mutableStateOf(bulbs.lastOrNull()?.room ?: "Living room") }
-                    Column(Modifier.fillMaxWidth().background(Surface2, RoundedCornerShape(14.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("New bulb …${p.mac.takeLast(4)}  ·  $ip  ·  tap Blink to see which one it is", color = TextDim, fontSize = 12.sp)
-                        OutlinedTextField(
-                            value = room, onValueChange = { room = it }, label = { Text("Room") },
-                            singleLine = true, modifier = Modifier.fillMaxWidth(),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = Accent, unfocusedBorderColor = Bg,
-                                focusedTextColor = TextMain, unfocusedTextColor = TextMain, cursorColor = Accent,
-                                focusedLabelColor = TextDim, unfocusedLabelColor = TextDim,
-                            ),
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PillButton("Blink", modifier = Modifier.weight(1f), color = Bg) { vm.blinkBulb(p.mac) }
-                            PillButton("Add to $room", modifier = Modifier.weight(2f), color = BulbOn, contentColor = Bg) { vm.addBulb(ip, p, room) }
+                    // ---- Add bulbs ----
+                    PillButton(if (searching) "Searching…" else "Find new bulbs", modifier = Modifier.fillMaxWidth(), color = Accent, contentColor = Bg) {
+                        if (!searching) vm.findBulbs()
+                    }
+                    newBulbs.forEach { (ip, p) ->
+                        key(ip) {
+                            var room by remember { mutableStateOf(bulbs.lastOrNull()?.room ?: "Living room") }
+                            Column(Modifier.fillMaxWidth().background(Surface2, RoundedCornerShape(14.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("New bulb …${p.mac.takeLast(4)}  ·  $ip  ·  tap Blink to see which one it is", color = TextDim, fontSize = 12.sp)
+                                OutlinedTextField(
+                                    value = room, onValueChange = { room = it }, label = { Text("Room") },
+                                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = Accent, unfocusedBorderColor = Bg,
+                                        focusedTextColor = TextMain, unfocusedTextColor = TextMain, cursorColor = Accent,
+                                        focusedLabelColor = TextDim, unfocusedLabelColor = TextDim,
+                                    ),
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    PillButton("Blink", modifier = Modifier.weight(1f), color = Bg) { vm.blinkBulb(p.mac) }
+                                    PillButton("Add to $room", modifier = Modifier.weight(2f), color = BulbOn, contentColor = Bg) { vm.addBulb(ip, p, room) }
+                                }
+                            }
                         }
                     }
                 }

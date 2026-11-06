@@ -9,6 +9,10 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /** Authenticated connection to the sole lighting manager, never a UDP fallback. */
 object ButlerClient {
@@ -38,6 +42,34 @@ object ButlerClient {
             check(response.isSuccessful) { result.optString("error", "Butler HTTP ${response.code}") }
             result
         }
+    }
+
+    private suspend fun publicPost(url: String, path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) {
+        val base = url.trim().trimEnd('/').toHttpUrl()
+        val request = Request.Builder().url(base.newBuilder().encodedPath(path).build())
+            .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+        http.newCall(request).execute().use { response ->
+            val result = JSONObject(response.body?.string() ?: "{}")
+            check(response.isSuccessful) { result.optString("error", "Butler HTTP ${response.code}") }
+            result
+        }
+    }
+
+    suspend fun pair(url: String, code: String): String {
+        require(code.matches(Regex("[0-9]{6}"))) { "Enter the six-digit code shown on the Mac" }
+        val token = publicPost(url, "/v1/pair", JSONObject().put("code", code)).getString("token")
+        validateConnection(url, token)
+        return token
+    }
+
+    /** Never send a saved credential to a new address just because mDNS advertised it. */
+    suspend fun verifyManager(url: String, token: String): Boolean {
+        validateConnection(url, token)
+        val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
+        val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(token.toByteArray(), "HmacSHA256")) }
+        val expected = mac.doFinal("uniremote-manager-v1:$nonce".toByteArray()).joinToString("") { "%02x".format(it) }
+        val proof = publicPost(url, "/v1/identity", JSONObject().put("nonce", nonce)).optString("proof")
+        return MessageDigest.isEqual(expected.toByteArray(), proof.toByteArray())
     }
 
 }

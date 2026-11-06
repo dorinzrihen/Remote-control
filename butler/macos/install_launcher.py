@@ -26,6 +26,7 @@ def application_info(script):
             "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
             "LSMinimumSystemVersion": "13.0", "LSUIElement": True,
             "NSLocalNetworkUsageDescription": "Find and control your WiZ light bulbs on the home network, including their timetable.",
+            "NSBonjourServices": ["_uniremote._tcp"],
             "ButlerManagerScript": str(script)}
 
 

@@ -9,6 +9,8 @@ import com.dorin.remote.atv.AtvKeys
 import com.dorin.remote.atv.AtvState
 import com.dorin.remote.net.Discovery
 import com.dorin.remote.net.FoundDevice
+import com.dorin.remote.net.ButlerDiscovery
+import com.dorin.remote.net.FoundButler
 import com.dorin.remote.net.Wol
 import com.dorin.remote.tizen.SamsungApp
 import com.dorin.remote.tizen.SamsungClient
@@ -106,7 +108,12 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val butlerEnabled = MutableStateFlow(prefs.butlerEnabled)
     val butlerBusy = MutableStateFlow(false)
     val butlerSettings = MutableStateFlow<org.json.JSONObject?>(null)
-    val butlerStatus = MutableStateFlow("Connect to the lighting manager. The phone never talks to bulbs directly.")
+    val butlerStatus = MutableStateFlow("Searching for your butler…")
+    val foundButlers = MutableStateFlow<List<FoundButler>>(emptyList())
+    val selectedButlerUrl = MutableStateFlow("")
+    val butlerDiscoveryStatus = MutableStateFlow("Searching on Wi-Fi…")
+    private val butlerDiscovery = ButlerDiscovery(app)
+    private var lastButlerReconnect = 0L
     /** Bulbs that answered the last search and are not saved yet: ip -> state. */
     val newBulbs = MutableStateFlow<Map<String, Pilot>>(emptyMap())
     val bulbSearching = MutableStateFlow(false)
@@ -561,13 +568,67 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- WiZ bulbs ----------
 
+    suspend fun discoverButlers() {
+        foundButlers.value = emptyList()
+        selectedButlerUrl.value = ""
+        butlerDiscoveryStatus.value = "Searching on Wi-Fi…"
+        try {
+            butlerDiscovery.discover().collect { found ->
+                foundButlers.value = found
+                butlerDiscoveryStatus.value = if (found.isEmpty()) "Searching on Wi-Fi…" else "Butler found"
+                if (found.none { it.url == selectedButlerUrl.value }) selectedButlerUrl.value = found.singleOrNull()?.url.orEmpty()
+                reconnectDiscoveredButler()
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) { butlerDiscoveryStatus.value = "Search unavailable. Use Advanced connection or reopen Bulbs." }
+    }
+
+    private suspend fun reconnectDiscoveredButler() {
+        if (lights.loaded.value || prefs.butlerToken.isBlank() || butlerBusy.value || foundButlers.value.isEmpty()) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastButlerReconnect < 10_000) return
+        lastButlerReconnect = now
+        butlerBusy.value = true
+        try {
+            for (manager in foundButlers.value) {
+                // Discovery is not authentication. Prove the manager holds the
+                // saved secret before sending that secret to a changed address.
+                try {
+                    if (!ButlerClient.verifyManager(manager.url, prefs.butlerToken)) continue
+                    val result = ButlerClient.exchange(manager.url, prefs.butlerToken, "/v1/status")
+                    adoptManager(manager.url, prefs.butlerToken, result)
+                    butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
+                    break
+                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Try the next advertised manager. */ }
+            }
+        } finally { butlerBusy.value = false }
+    }
+
+    fun pairButler(url: String, code: String) {
+        if (butlerBusy.value || !canUseManager(url)) return
+        viewModelScope.launch {
+            butlerBusy.value = true
+            try {
+                val token = ButlerClient.pair(url, code)
+                val result = ButlerClient.exchange(url, token, "/v1/status")
+                adoptManager(url, token, result)
+                butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
+            } catch (e: Exception) { butlerStatus.value = e.message ?: "Pairing failed" }
+            finally { butlerBusy.value = false }
+        }
+    }
+
     suspend fun pollBulbs() {
+        if (butlerBusy.value) return
+        if (!lights.loaded.value) reconnectDiscoveredButler()
         if (prefs.butlerUrl.isBlank() || butlerBusy.value) return
         try {
             lights.refresh()
             butlerEnabled.value = lights.config.value?.getBoolean("enabled") ?: false
             prefs.butlerEnabled = butlerEnabled.value
-            butlerStatus.value = "Connected. ${lights.bulbs.value.size} manager bulb(s); status refreshes every second."
+            butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
         } catch (e: Exception) { butlerStatus.value = "Manager unavailable: ${e.message}" }
     }
 
@@ -597,7 +658,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
                 val result = ButlerClient.exchange(url, token, "/v1/status")
                 adoptManager(url, token, result)
                 newBulbs.value = emptyMap()
-                butlerStatus.value = "Connected. Loaded ${lights.bulbs.value.size} manager bulb(s). No lighting changes sent."
+                butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
             } catch (e: Exception) {
                 lights.unavailable(e.message ?: "Connection failed")
                 butlerStatus.value = "Could not connect: ${e.message}"
@@ -638,8 +699,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
                 prefs.butlerPending = true
                 val result = ButlerClient.exchange(url, token, "/v1/config", config)
                 adoptManager(url, token, result)
-                butlerStatus.value = if (enabled) "Manager timetable saved; bulb list and manual overrides preserved. No light command sent."
-                    else "Timetable disabled. Manual controls still go only through the manager."
+                butlerStatus.value = if (enabled) "Timetable saved" else "Timetable off"
             } catch (e: Exception) { butlerStatus.value = "Save unconfirmed: ${e.message}. Load manager status before retrying." }
             finally { butlerBusy.value = false }
         }
