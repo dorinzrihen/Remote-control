@@ -1,9 +1,13 @@
 from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+from urllib.request import urlopen
+import json
 
 from preview_gallery import CAPTURES, write_gallery
+from gallery_server import create_server
 
 
 class Elements(HTMLParser):
@@ -50,23 +54,48 @@ class PreviewGalleryTest(unittest.TestCase):
 
     def test_no_flickering_reload_or_tabs(self):
         page = self.page()
-        for forbidden in ("setInterval", "location.reload", "http-equiv", "fetch(", "data-tab", "UniRemote Preview"):
+        for forbidden in ("location.reload", "http-equiv", "data-tab", "UniRemote Preview"):
             self.assertNotIn(forbidden, page)
         self.assertIn("sessionStorage", page)
         self.assertIn("data-enlarge", page)
+        self.assertIn("/__gallery_manifest", page)
+        self.assertIn("replacement.replaceWith(existing)", page)
 
     def test_truthful_notes_below_screenshots(self):
         page = self.page()
         for phrase in ("LIMITATION · no Follow marker", "observed bulb output", "No existing-room rename",
-                       "Old setup / Advanced — being removed", "anyone on Wi-Fi", "Removal is in progress",
+                       "Working now:", "anyone on Wi-Fi", "Fresh emulator connected without entering any fields",
                        "Assistant-added choice, not requested", "v1.7: “Butler token”"):
             self.assertIn(phrase, page)
-        self.assertLess(page.index('id="modes"'), page.index('id="old-setup"'))
+        self.assertLess(page.index('id="modes"'), page.index('id="old-code"'))
+        self.assertNotIn("being removed", page)
+        self.assertNotIn("in progress", page)
+        self.assertEqual("Live Mac", CAPTURES["advanced"][1])
 
     def test_no_broken_apk_link(self):
         self.assertNotIn('href="UniRemote-Preview.apk"', self.page())
         (self.output / "UniRemote-Preview.apk").write_bytes(b"test apk")
         self.assertIn('href="UniRemote-Preview.apk" download', self.page())
+
+    def test_local_manifest_tracks_html_and_images(self):
+        self.page()
+        server = create_server(self.output)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.assertEqual('127.0.0.1', server.server_address[0])
+        url = f'http://127.0.0.1:{server.server_port}/__gallery_manifest'
+        with urlopen(url) as response:
+            before = json.load(response)
+            self.assertEqual('no-store', response.headers['Cache-Control'])
+        (self.output / 'bulbs-night.png').write_bytes(b'changed')
+        with urlopen(url) as response:
+            after = json.load(response)
+        self.assertNotEqual(before['files'], after['files'])
+        self.assertEqual(before['html'], after['html'])
+        (self.output / 'index.html').write_text('<html>changed source</html>')
+        with urlopen(url) as response:
+            self.assertNotEqual(after['html'], json.load(response)['html'])
 
 
 if __name__ == "__main__":
