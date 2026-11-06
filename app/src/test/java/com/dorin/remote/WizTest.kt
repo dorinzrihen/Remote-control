@@ -21,6 +21,16 @@ class WizTest {
     @Test fun night() = assertJson("""{"method":"setPilot","params":{"state":true,"dimming":20,"temp":2700}}""", Wiz.setModeJson(LightMode.NIGHT))
     @Test fun off() = assertJson("""{"method":"setPilot","params":{"state":false}}""", Wiz.setStateJson(false))
     @Test fun getPilot() = assertJson("""{"method":"getPilot","params":{}}""", Wiz.getPilotJson())
+    @Test fun plainOnHasNoPresetOrTimetable() = assertJson("""{"method":"setPilot","params":{"state":true}}""", Wiz.setStateJson(true))
+    @Test fun systemConfigQueryIsReadOnly() = assertJson("""{"method":"getSystemConfig","params":{}}""", Wiz.getSystemConfigJson())
+
+    @Test fun parseHardwareAndFirmware() {
+        val config = Wiz.parseSystemConfig("""{"method":"getSystemConfig","result":{"mac":"aabbccddeeff","moduleName":"ESP24_SHRGBC_01","fwVersion":"1.29.0"}}""")!!
+        assertEquals("ESP24_SHRGBC_01", config.moduleName)
+        assertEquals("1.29.0", config.fwVersion)
+        assertEquals("aabbccddeeff", config.mac)
+        assertNull(Wiz.parseSystemConfig("""{"error":{"code":-32601}}"""))
+    }
 
     @Test fun parseWhite() {
         val p = Wiz.parsePilot("""{"method":"getPilot","env":"pro","result":{"mac":"aabbccddeeff","rssi":-62,"state":true,"sceneId":0,"temp":2700,"dimming":20}}""")

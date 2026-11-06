@@ -15,6 +15,7 @@ import com.dorin.remote.tizen.SamsungClient
 import com.dorin.remote.tizen.SamsungState
 import com.dorin.remote.webos.LgState
 import com.dorin.remote.wiz.LightMode
+import com.dorin.remote.wiz.ButlerClient
 import com.dorin.remote.wiz.Pilot
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -103,6 +104,11 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val lights = application.lights
     val showBulbs = MutableStateFlow(false)
     val autoNight = MutableStateFlow(prefs.autoNight)
+    val butlerEnabled = MutableStateFlow(prefs.butlerEnabled)
+    val butlerBusy = MutableStateFlow(false)
+    val butlerSettings = MutableStateFlow(runCatching { prefs.butlerConfig?.let { org.json.JSONObject(it) } }.getOrNull())
+    val butlerStatus = MutableStateFlow(if (prefs.butlerPending) "Settings unconfirmed. Phone alarm suspended; Load and Save to recover."
+        else "Not connected. Laptop fallback, not native bulb Rhythms.")
     /** Bulbs that answered the last search and are not saved yet: ip -> state. */
     val newBulbs = MutableStateFlow<Map<String, Pilot>>(emptyMap())
     val bulbSearching = MutableStateFlow(false)
@@ -557,13 +563,84 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- WiZ bulbs ----------
 
-    fun refreshBulbs() { viewModelScope.launch { lights.refresh() } }
+    fun refreshBulbs() { viewModelScope.launch { lights.refresh(); lights.readSystemConfigs() } }
+
+    fun loadButler(url: String, token: String) {
+        if (butlerBusy.value) return
+        viewModelScope.launch {
+            butlerBusy.value = true
+            try {
+                val result = ButlerClient.exchange(url, token, "/v1/config")
+                butlerSettings.value = result.getJSONObject("config")
+                prefs.butlerConfig = butlerSettings.value.toString()
+                butlerStatus.value = "Connected. Settings loaded from laptop; Save to use them on this phone."
+            } catch (e: Exception) { butlerStatus.value = "Could not connect: ${e.message}" }
+            finally { butlerBusy.value = false }
+        }
+    }
+
+    fun saveButler(url: String, token: String, enabled: Boolean, night: String, morning: String, timezone: String, pollSeconds: String) {
+        if (butlerBusy.value) return
+        try { ButlerClient.validateConnection(url, token) }
+        catch (e: Exception) { butlerStatus.value = e.message ?: "Invalid connection"; return }
+        val timePattern = Regex("(?:[01][0-9]|2[0-3]):[0-5][0-9]")
+        if (!timePattern.matches(night) || !timePattern.matches(morning) || night == morning) {
+            butlerStatus.value = "Enter different Night and Day times in 24-hour HH:MM format."
+            return
+        }
+        val interval = pollSeconds.toIntOrNull()
+        if (interval == null || interval !in 1..300) {
+            butlerStatus.value = "Polling interval must be a whole number from 1 to 300 seconds."
+            return
+        }
+        try { java.time.ZoneId.of(timezone) }
+        catch (_: Exception) { butlerStatus.value = "Enter a valid home timezone, e.g. Asia/Jerusalem."; return }
+        // Disabling the old scheduler must be acknowledged before changing
+        // hosts, otherwise two laptops could keep controlling the same bulbs.
+        if ((prefs.butlerEnabled || prefs.butlerPending) && url.trim().trimEnd('/') != prefs.butlerUrl) {
+            butlerStatus.value = "Disable and Save using the existing connection before changing laptop."
+            return
+        }
+        viewModelScope.launch {
+            butlerBusy.value = true
+            try {
+                val config = ButlerClient.config(enabled, night, morning, timezone, lights.bulbs.value, interval)
+                // A lost HTTP reply may mean the laptop DID enable scheduling.
+                // Persist the connection and suspend competing phone actions
+                // before sending; recover by saving again (idempotent).
+                prefs.butlerUrl = url.trim().trimEnd('/'); prefs.butlerToken = token
+                prefs.butlerPending = true
+                NightLightsReceiver.schedule(getApplication())
+                val result = ButlerClient.exchange(url, token, "/v1/config", config)
+                prefs.butlerEnabled = enabled; butlerEnabled.value = enabled
+                prefs.butlerPending = false
+                butlerSettings.value = result.getJSONObject("config")
+                prefs.butlerConfig = butlerSettings.value.toString()
+                NightLightsReceiver.schedule(getApplication())
+                butlerStatus.value = if (enabled) "Laptop timetable saved. Phone alarm suspended. No bulb settings were uploaded."
+                    else "Laptop timetable disabled. Original phone controls restored."
+            } catch (e: Exception) { butlerStatus.value = "Settings unconfirmed: ${e.message}. Phone alarm suspended; correct settings and Save again." }
+            finally { butlerBusy.value = false }
+        }
+    }
+
+    fun followTimetable(room: String) {
+        if (prefs.butlerPending) { say("Load and Save the unconfirmed butler settings first"); return }
+        viewModelScope.launch {
+            try {
+                val ok = ButlerClient.room(prefs, room, "AUTO")
+                lights.refresh()
+                say("$room: $ok bulb(s) returned to timetable; off bulbs stay off")
+            } catch (e: Exception) { say("Butler unavailable: ${e.message}") }
+        }
+    }
 
     /** A null mode turns the room off. */
     fun setRoom(room: String, mode: LightMode?) {
         viewModelScope.launch {
             val total = lights.bulbs.value.count { it.room == room }
-            val ok = lights.setRoom(room, mode)
+            val ok = try { lights.setRoom(room, mode) }
+                catch (e: Exception) { say("Butler unavailable; no direct command sent. ${e.message}"); return@launch }
             if (ok == 0) say("$room: bulbs not reachable. Is the phone on the home Wi-Fi and the wall switch on?")
             else if (ok < total) say("$room: ${total - ok} of $total bulbs did not answer")
         }
@@ -571,6 +648,19 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The on/off button of a room: off when a bulb is on, otherwise on in Regular, or in Night between 21:00 and 06:00. */
     fun toggleRoom(room: String) {
+        if (prefs.butlerPending) { say("Load and Save the unconfirmed butler settings first"); return }
+        if (prefs.butlerEnabled) {
+            viewModelScope.launch {
+                try {
+                    val ok = ButlerClient.room(prefs, room, "TOGGLE")
+                    val total = lights.bulbs.value.count { it.room == room }
+                    if (ok == 0) say("$room: no bulbs answered the butler")
+                    else if (ok < total) say("$room: ${total - ok} of $total bulbs did not answer")
+                    lights.refresh()
+                } catch (e: Exception) { say("Butler unavailable: ${e.message}") }
+            }
+            return
+        }
         val anyOn = lights.bulbs.value.any { it.room == room && lights.pilots.value[it.mac]?.on == true }
         setRoom(room, if (anyOn) null else if (NightTime.isNightNow()) LightMode.NIGHT else LightMode.REGULAR)
     }
@@ -587,14 +677,21 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun addBulb(ip: String, pilot: Pilot, room: String) {
+        if (prefs.butlerEnabled || prefs.butlerPending) { say("Disable and Save the laptop timetable before changing the bulb list"); return }
         lights.add(pilot.mac, ip, room.trim().ifEmpty { "Living room" })
         newBulbs.value = newBulbs.value - ip
         NightLightsReceiver.schedule(getApplication())
         refreshBulbs()
     }
 
-    fun removeBulb(mac: String) { lights.remove(mac); NightLightsReceiver.schedule(getApplication()) }
-    fun blinkBulb(ip: String) { viewModelScope.launch { lights.blink(ip) } }
+    fun removeBulb(mac: String) {
+        if (prefs.butlerEnabled || prefs.butlerPending) { say("Disable and Save the laptop timetable before changing the bulb list"); return }
+        lights.remove(mac); NightLightsReceiver.schedule(getApplication())
+    }
+    fun blinkBulb(ip: String) {
+        if (prefs.butlerEnabled || prefs.butlerPending) { say("Disable the laptop timetable before blinking, so the scheduler does not mistake it for wall-switch On"); return }
+        viewModelScope.launch { lights.blink(ip) }
+    }
     fun setAutoNight(v: Boolean) { prefs.autoNight = v; autoNight.value = v; NightLightsReceiver.schedule(getApplication()) }
 
     fun screenOff() { lg.screenOff(); say("Screen off (sound stays on). Press any button to wake it.") }

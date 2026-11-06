@@ -17,6 +17,11 @@ class Lights(private val prefs: Prefs) {
     val bulbs = MutableStateFlow(load())
     /** Last state each saved bulb reported, by MAC. A bulb missing here did not answer. */
     val pilots = MutableStateFlow<Map<String, Pilot>>(emptyMap())
+    val systemConfigs = MutableStateFlow<Map<String, SystemConfig>>(emptyMap())
+
+    suspend fun readSystemConfigs() {
+        systemConfigs.value = eachBulb(bulbs.value) { b -> Wiz.getSystemConfig(b.ip)?.takeIf { it.mac == b.mac } }
+    }
 
     fun add(mac: String, ip: String, room: String) = store(bulbs.value.filterNot { it.mac == mac } + Bulb(mac, ip, room))
     fun remove(mac: String) = store(bulbs.value.filterNot { it.mac == mac })
@@ -39,6 +44,10 @@ class Lights(private val prefs: Prefs) {
 
     /** Sets every bulb in the room; a null mode turns them off. Returns how many bulbs answered. */
     suspend fun setRoom(room: String, mode: LightMode?): Int {
+        check(!prefs.butlerPending) { "Butler settings unconfirmed. Load and Save them before sending commands." }
+        // Serialize manual intent with the scheduler. If the laptop is down,
+        // fail visibly rather than silently send an override it cannot see.
+        if (prefs.butlerEnabled) return ButlerClient.room(prefs, room, mode?.name ?: "OFF").also { refresh() }
         val json = if (mode == null) Wiz.setStateJson(false) else Wiz.setModeJson(mode)
         val ok = eachBulb(bulbs.value.filter { it.room == room }) { b -> Wiz.request(b.ip, json) }
         refresh()

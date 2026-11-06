@@ -65,6 +65,23 @@ class Prefs(ctx: Context) {
     var autoNight: Boolean
         get() = sp.getBoolean("auto_night", true)
         set(v) = sp.edit().putBoolean("auto_night", v).apply()
+    /** Opt-in laptop fallback. Pending transactions also suspend the phone alarm. */
+    var butlerEnabled: Boolean
+        get() = sp.getBoolean("butler_enabled", false)
+        set(v) = sp.edit().putBoolean("butler_enabled", v).apply()
+    var butlerUrl: String
+        get() = sp.getString("butler_url", "") ?: ""
+        set(v) = sp.edit().putString("butler_url", v).apply()
+    var butlerToken: String
+        get() = sp.getString("butler_token", "") ?: ""
+        set(v) = sp.edit().putString("butler_token", v).apply()
+    var butlerPending: Boolean
+        get() = sp.getBoolean("butler_pending", false)
+        set(v) = sp.edit().putBoolean("butler_pending", v).apply()
+    /** Last confirmed laptop settings, so reopening offline never shows default times as the saved timetable. */
+    var butlerConfig: String?
+        get() = sp.getString("butler_config", null)
+        set(v) = sp.edit().putString("butler_config", v).apply()
     var xiaomiInputId: String?
         get() = sp.getString("xiaomi_input", null)
         set(v) = sp.edit().putString("xiaomi_input", v).apply()

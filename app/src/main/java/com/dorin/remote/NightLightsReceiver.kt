@@ -42,6 +42,7 @@ object NightTime {
 class NightLightsReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         if (intent.action != ACTION_NIGHT) { schedule(ctx); return }
+        if (!App.instance.prefs.autoNight || App.instance.prefs.butlerEnabled || App.instance.prefs.butlerPending) { schedule(ctx); return }
         val pending = goAsync()
         scope.launch {
             try {
@@ -66,7 +67,7 @@ class NightLightsReceiver : BroadcastReceiver() {
                 ctx, 0, Intent(ctx, NightLightsReceiver::class.java).setAction(ACTION_NIGHT),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
-            if (!app.prefs.autoNight || app.lights.bulbs.value.isEmpty()) { am.cancel(pi); return }
+            if (!app.prefs.autoNight || app.prefs.butlerEnabled || app.prefs.butlerPending || app.lights.bulbs.value.isEmpty()) { am.cancel(pi); return }
             val at = NightTime.next(System.currentTimeMillis())
             if (Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms()) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
             else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)

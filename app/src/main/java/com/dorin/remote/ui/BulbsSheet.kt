@@ -48,6 +48,8 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     val autoNight by vm.autoNight.collectAsState()
     val newBulbs by vm.newBulbs.collectAsState()
     val searching by vm.bulbSearching.collectAsState()
+    val butlerEnabled by vm.butlerEnabled.collectAsState()
+    val systemConfigs by vm.lights.systemConfigs.collectAsState()
     LaunchedEffect(Unit) { vm.refreshBulbs() }
 
     // Opens fully so the buttons at the bottom are not hidden under the navigation bar.
@@ -83,6 +85,7 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
                             }
                         }
                     }
+                    if (butlerEnabled) PillButton("Follow timetable (leave off bulbs off)", modifier = Modifier.fillMaxWidth()) { vm.followTimetable(room) }
                 }
             }
             if (bulbs.isNotEmpty()) Text("Regular: 100% cool white  ·  Night: 20% warm", color = TextDim, fontSize = 11.sp)
@@ -90,7 +93,7 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
             // ---- Night at 21:00 ----
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Night at ${NightTime.NIGHT_HOUR}:00", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Phone-only Night at ${NightTime.NIGHT_HOUR}:00", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         "Lights that are on switch to Night; lights that are off stay off. The on/off button starts in Night between " +
                             "${NightTime.NIGHT_HOUR}:00 and 0${NightTime.MORNING_HOUR}:00. What you press after ${NightTime.NIGHT_HOUR}:00 stays until the next evening. " +
@@ -99,17 +102,19 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
                     )
                 }
                 Spacer(Modifier.width(8.dp))
-                Switch(checked = autoNight, onCheckedChange = vm::setAutoNight)
+                Switch(checked = autoNight, onCheckedChange = vm::setAutoNight, enabled = !butlerEnabled)
             }
+            if (butlerEnabled) Text("Phone alarm suspended. The laptop uses the editable timetable below, not 21:00.", color = TextDim, fontSize = 12.sp)
+            ButlerSettings(vm)
 
             // ---- Saved bulbs ----
             if (bulbs.isNotEmpty()) Text("Saved bulbs", color = TextDim, fontSize = 13.sp)
             bulbs.forEach { b ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "${b.room}  ·  …${b.mac.takeLast(4)}" + if (pilots[b.mac] == null) "  ·  not reachable" else "",
-                        color = TextMain, fontSize = 13.sp, modifier = Modifier.weight(1f),
-                    )
+                    Column(Modifier.weight(1f)) {
+                        Text("${b.room}  ·  …${b.mac.takeLast(4)}" + if (pilots[b.mac] == null) "  ·  not reachable" else "", color = TextMain, fontSize = 13.sp)
+                        systemConfigs[b.mac]?.let { Text("${it.moduleName} · firmware ${it.fwVersion}", color = TextDim, fontSize = 11.sp) }
+                    }
                     PillButton("Blink") { vm.blinkBulb(b.ip) }
                     Spacer(Modifier.width(6.dp))
                     PillButton("Remove", contentColor = Danger, onLongPress = { vm.removeBulb(b.mac) }) {
