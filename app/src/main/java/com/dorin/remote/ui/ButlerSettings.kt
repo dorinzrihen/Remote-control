@@ -52,14 +52,14 @@ fun ButlerSettings(vm: RemoteViewModel) {
         }
     }
     Column(Modifier.fillMaxWidth().background(Surface2, RoundedCornerShape(14.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Laptop timetable (optional)", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Text("Not native WiZ Rhythms. Requires the butler service on an always-on laptop. Nothing is enabled until you Save.", color = TextDim, fontSize = 12.sp)
-        Text("${if (active) "Active" else "Inactive"} on this phone. $status", color = TextDim, fontSize = 12.sp)
+        Text("Lighting manager", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text("The manager alone discovers, reads and controls bulbs, even when its timetable is disabled. Requires the service on an always-on computer; not native WiZ Rhythms.", color = TextDim, fontSize = 12.sp)
+        Text("Manager timetable: ${if (active) "enabled" else "disabled"}. $status", color = TextDim, fontSize = 12.sp)
         OutlinedTextField(url, { url = it }, label = { Text("Butler URL, e.g. http://192.168.1.10:8788") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(token, { token = it }, label = { Text("Butler token") }, singleLine = true, enabled = !busy,
             visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Use laptop timetable", color = TextMain, modifier = Modifier.weight(1f))
+            Text("Enable manager timetable", color = TextMain, modifier = Modifier.weight(1f))
             Switch(enabled, { enabled = it }, enabled = !busy)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -69,9 +69,9 @@ fun ButlerSettings(vm: RemoteViewModel) {
         OutlinedTextField(timezone, { timezone = it }, label = { Text("Home timezone (e.g. Asia/Jerusalem)") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(pollSeconds, { pollSeconds = it }, label = { Text("Poll every X seconds (1–300)") }, singleLine = true, enabled = !busy,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-        Text("The laptop checks state at this interval; it does not overwrite your choice every poll. Timetable boundaries wake it sooner.", color = TextDim, fontSize = 12.sp)
+        Text("The manager polls bulbs every 1 second by default; this screen also refreshes manager status every second. Timetable boundaries wake the manager sooner.", color = TextDim, fontSize = 12.sp)
         Text("Regular: 100%, 6500K. Night: 20%, 2700K. Changes apply to bulbs that are on and to detected wall-switch On events. Manual presets last until the next timetable boundary; Follow timetable resumes sooner. Off bulbs stay off.", color = TextDim, fontSize = 12.sp)
-        Text("Load reads laptop settings. Save replaces its bulb list with this phone’s saved bulbs. Disable and Save before editing bulbs or changing laptops. No direct UDP fallback if the laptop is unavailable.", color = TextDim, fontSize = 12.sp)
+        Text("Load adopts the manager’s bulbs and settings. Save changes only the timetable, never the bulb list, and sends no light command. Old phone-saved bulbs are not imported automatically; use Find new bulbs and Add explicitly. No direct UDP fallback.", color = TextDim, fontSize = 12.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PillButton(if (busy) "Working…" else "Load", modifier = Modifier.weight(1f)) { if (!busy) vm.loadButler(url, token) }
             PillButton("Save", modifier = Modifier.weight(1f), color = Accent, contentColor = Bg) {

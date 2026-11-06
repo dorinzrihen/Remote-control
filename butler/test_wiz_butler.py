@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,8 @@ class FakeUdp:
     def request(self, ip, method, params):
         if method == "getPilot":
             return copy.deepcopy(self.state)
+        if method == "getSystemConfig":
+            return {"mac": MAC, "moduleName": "ESP24_SHRGBC_01", "fwVersion": "1.29.0"}
         self.writes.append((ip, method, dict(params)))
         if self.ack:
             self.state.update(params)
@@ -49,6 +52,7 @@ class ButlerTest(unittest.TestCase):
         self.udp = FakeUdp()
         self.butler = Butler(self.path, self.udp)
         self.config = copy.deepcopy(DEFAULT_CONFIG) | {"enabled": True, "bulbs": [BULB]}
+        self.butler.add_bulb(BULB)
         self.butler.configure(self.config)
 
     def test_validation(self):
@@ -235,11 +239,11 @@ class ButlerTest(unittest.TestCase):
         self.butler.command("Bedroom", "AUTO", at(22, 2))
         self.assertEqual(count, len(self.udp.writes))
 
-    def test_on_uses_laptop_time_and_rejoins(self):
+    def test_on_uses_manager_time_and_holds_until_boundary(self):
         self.butler.command("Bedroom", "REGULAR", at(22))
         self.butler.command("Bedroom", "ON", at(22, 1))
         self.assertEqual({"state": True, **MODES["NIGHT"]}, self.udp.writes[-1][2])
-        self.assertNotIn(MAC, self.butler.holds)
+        self.assertEqual(at(6, day=6), self.butler.holds[MAC])
 
     def test_toggle_is_decided_by_laptop(self):
         self.butler.command("Bedroom", "TOGGLE", at(22))
@@ -247,7 +251,7 @@ class ButlerTest(unittest.TestCase):
         self.butler.command("Bedroom", "TOGGLE", at(22, 1))
         self.assertTrue(self.udp.state["state"])
         self.assertEqual({"state": True, **MODES["NIGHT"]}, self.udp.writes[-1][2])
-        self.assertNotIn(MAC, self.butler.holds)
+        self.assertEqual(at(6, day=6), self.butler.holds[MAC])
 
     def test_wrong_mac_never_receives_a_write(self):
         self.udp.state["mac"] = "000000000000"
@@ -273,10 +277,11 @@ class ButlerTest(unittest.TestCase):
         self.butler.configure(self.config | {"enabled": False})
         self.butler.tick(at(20, 59))
         self.butler.tick(at(21))
-        with self.assertRaises(ValueError):
-            self.butler.command("Bedroom", "NIGHT", at(22))
         self.assertEqual([], self.udp.writes)
         self.assertFalse(Butler(self.path, self.udp).config["enabled"])
+        self.assertEqual(1, self.butler.command("Bedroom", "NIGHT", at(22))["answered"])
+        with self.assertRaisesRegex(ValueError, "Timetable is disabled"):
+            self.butler.command("Bedroom", "AUTO", at(22))
 
     def test_configure_preserves_holds_and_does_not_write(self):
         self.butler.command("Bedroom", "REGULAR", at(22))
@@ -286,6 +291,213 @@ class ButlerTest(unittest.TestCase):
         self.assertIn(MAC, self.butler.holds)
         self.assertEqual([], self.udp.writes)
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
+
+    def test_existing_manager_file_preserves_bulbs_and_holds_without_migration(self):
+        hold = at(6, day=6)
+        second = {"mac": "112233445566", "ip": "192.168.1.12", "room": "Bulb …a582"}
+        stored = {"config": self.config | {"bulbs": [BULB, second]}, "holds": {MAC: hold}}
+        self.path.write_text(json.dumps(stored))
+        restarted = Butler(self.path, self.udp)
+        self.assertEqual(stored["config"], restarted.config)
+        self.assertEqual({MAC: hold}, restarted.holds)
+        self.assertEqual([], self.udp.writes)
+
+    def test_schedule_only_save_cannot_erase_existing_manager_bulbs(self):
+        self.butler.command("Bedroom", "NIGHT", at(22))
+        self.udp.writes.clear()
+        with self.assertRaisesRegex(ValueError, "Manager owns the bulb list"):
+            self.butler.configure(self.config | {"bulbs": []})
+        schedule_only = {key: value for key, value in self.config.items() if key != "bulbs"}
+        self.butler.configure(schedule_only | {"night": "23:15"})
+        self.assertEqual([BULB], self.butler.config["bulbs"])
+        self.assertEqual(at(6, day=6), self.butler.holds[MAC])
+        self.assertEqual([], self.udp.writes)
+        self.assertEqual([BULB], Butler(self.path, self.udp).config["bulbs"])
+
+    def test_discovery_is_read_only_and_returns_manager_observations(self):
+        self.udp.found = {MAC: "192.168.1.30"}
+        result = self.butler.discover()
+        found = result["discovered"][0]
+        self.assertEqual(MAC, found["mac"])
+        self.assertEqual("192.168.1.30", found["ip"])
+        self.assertTrue(found["pilot"]["state"])
+        self.assertEqual("1.29.0", found["systemConfig"]["fwVersion"])
+        self.assertEqual("192.168.1.30", result["status"]["config"]["bulbs"][0]["ip"])
+        self.assertEqual([], self.udp.writes)
+
+    def test_discovery_rejects_mismatched_mac_and_invalid_addresses(self):
+        self.udp.found = {"000000000000": "192.168.1.30", MAC: "127.0.0.1", "not-a-mac": "192.168.1.31"}
+        self.assertEqual([], self.butler.discover()["discovered"])
+        self.assertNotIn(MAC, self.butler.addresses)
+        self.assertEqual([], self.udp.writes)
+
+    def test_schedule_save_preserves_dhcp_address_and_existing_errors(self):
+        self.butler.addresses[MAC] = "192.168.1.30"
+        self.butler.errors[MAC] = "unreachable or MAC mismatch"
+        self.butler.configure(self.config)
+        snapshot = self.butler.status()
+        self.assertEqual("192.168.1.30", snapshot["config"]["bulbs"][0]["ip"])
+        self.assertIn(MAC, snapshot["errors"])
+
+    def test_failed_override_storage_never_sends_write_and_rolls_back_hold(self):
+        with patch.object(self.butler, "save", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.butler.command("Bedroom", "NIGHT", at(22))
+        self.assertNotIn(MAC, self.butler.holds)
+        self.assertEqual([], self.udp.writes)
+
+    def test_add_is_explicit_persists_room_and_never_applies_preset(self):
+        self.butler.add_bulb(BULB | {"room": "Kitchen"})
+        self.assertEqual("Kitchen", Butler(self.path, self.udp).config["bulbs"][0]["room"])
+        self.butler.tick(at(22))
+        self.assertEqual([], self.udp.writes)
+
+    def test_add_rejects_wrong_identity_without_changing_manager_file(self):
+        before = self.path.read_text()
+        self.udp.state["mac"] = "000000000000"
+        with self.assertRaisesRegex(ValueError, "expected MAC"):
+            self.butler.add_bulb(BULB | {"room": "Kitchen"})
+        self.assertEqual(before, self.path.read_text())
+        self.assertEqual([], self.udp.writes)
+
+    def test_remove_persists_without_contacting_or_turning_off_bulb(self):
+        self.butler.command("Bedroom", "NIGHT", at(22))
+        self.udp.writes.clear()
+        with patch.object(self.udp, "request", side_effect=AssertionError("Remove must not contact bulb")):
+            result = self.butler.remove_bulb(MAC)
+        self.assertEqual([], result["config"]["bulbs"])
+        self.assertNotIn(MAC, result["holds"])
+        self.assertEqual([], Butler(self.path, self.udp).config["bulbs"])
+        self.assertEqual([], self.udp.writes)
+
+    def test_add_remove_roll_back_on_storage_failure(self):
+        before = copy.deepcopy(self.butler.config)
+        with patch.object(self.butler, "save", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.butler.add_bulb(BULB | {"room": "Kitchen"})
+            self.assertEqual(before, self.butler.config)
+            with self.assertRaises(OSError):
+                self.butler.remove_bulb(MAC)
+            self.assertEqual(before, self.butler.config)
+
+    def test_disabled_timetable_still_polls_authoritative_status(self):
+        self.butler.configure(self.config | {"enabled": False})
+        self.udp.state["state"] = False
+        self.butler.tick(at(22))
+        status = self.butler.status()
+        self.assertFalse(status["pilots"][MAC]["state"])
+        self.assertEqual(at(22), status["lastPoll"])
+        self.assertGreater(status["observedAt"][MAC], 0)
+        self.assertGreaterEqual(status["statusAt"], status["observedAt"][MAC])
+        self.assertEqual("1.29.0", status["systemConfigs"][MAC]["fwVersion"])
+        self.assertEqual([], self.udp.writes)
+
+    def test_timeout_clears_current_state_but_keeps_last_success_time(self):
+        self.butler.tick(at(22))
+        observed = self.butler.status()["observedAt"][MAC]
+        self.udp.state = None
+        self.butler.tick(at(22, 1))
+        snapshot = self.butler.status()
+        self.assertNotIn(MAC, snapshot["pilots"])
+        self.assertEqual(observed, snapshot["observedAt"][MAC])
+        self.assertIn("unreachable", snapshot["errors"][MAC])
+
+    def test_every_write_rechecks_identity_not_only_initial_room_read(self):
+        original = self.udp.request
+        reads = 0
+
+        def changed_identity(ip, method, params):
+            nonlocal reads
+            result = original(ip, method, params)
+            if method == "getPilot":
+                reads += 1
+                if reads == 1:
+                    self.udp.state["mac"] = "000000000000"
+            return result
+
+        self.udp.request = changed_identity
+        self.assertEqual(0, self.butler.command("Bedroom", "NIGHT", at(22))["answered"])
+        self.assertEqual([], self.udp.writes)
+
+    def test_blink_preserves_power_preset_and_existing_override(self):
+        for on in (False, True):
+            with self.subTest(on=on), patch("wiz_butler.time.sleep"):
+                self.udp.state = {"mac": MAC, "state": on, **MODES["REGULAR"]}
+                self.butler.holds[MAC] = at(6, day=6)
+                self.butler.tick(at(22))
+                self.udp.writes.clear()
+                self.butler.blink(MAC)
+                self.assertEqual(on, self.udp.state["state"])
+                self.assertEqual(6500, self.udp.state["temp"])
+                self.assertEqual(100, self.udp.state["dimming"])
+                self.assertEqual(at(6, day=6), self.butler.holds[MAC])
+                count = len(self.udp.writes)
+                self.butler.tick(at(22, 1))
+                self.assertEqual(count, len(self.udp.writes))
+
+    def test_blink_discovered_unsaved_bulb_and_reject_unknown_identifier(self):
+        self.butler.remove_bulb(MAC)
+        with self.assertRaisesRegex(ValueError, "Unknown bulb"):
+            self.butler.blink(MAC)
+        self.udp.found = {MAC: BULB["ip"]}
+        self.butler.discover()
+        with patch("wiz_butler.time.sleep"):
+            self.butler.blink(MAC)
+        self.assertEqual([], self.butler.config["bulbs"])
+        self.assertTrue(self.udp.writes)
+
+    def test_blink_never_writes_to_wrong_identity_or_unreachable_bulb(self):
+        for state in (None, {"mac": "000000000000", "state": True}):
+            self.udp.state = state
+            with self.assertRaisesRegex(ValueError, "MAC mismatch"):
+                self.butler.blink(MAC)
+        self.assertEqual([], self.udp.writes)
+
+    def test_blink_restore_rechecks_identity_before_each_write(self):
+        original = self.udp.request
+
+        def identity_changes_after_first_flash(ip, method, params):
+            result = original(ip, method, params)
+            if method == "setPilot":
+                self.udp.state["mac"] = "000000000000"
+            return result
+
+        self.udp.request = identity_changes_after_first_flash
+        with patch("wiz_butler.time.sleep"), self.assertRaisesRegex(ValueError, "restore"):
+            self.butler.blink(MAC)
+        self.assertEqual(1, len(self.udp.writes))
+
+    def test_all_http_endpoints_require_auth_and_status_get_is_cached(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.butler, "x" * 32))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        def request(method, path, value=None, authorized=True):
+            connection = http.client.HTTPConnection(*server.server_address, timeout=3)
+            headers = {"Authorization": "Bearer " + "x" * 32} if authorized else {}
+            connection.request(method, path, json.dumps(value) if value is not None else None, headers)
+            response = connection.getresponse()
+            result = response.status, json.loads(response.read())
+            connection.close()
+            return result
+
+        for path in ("/v1/status", "/v1/config"):
+            self.assertEqual(401, request("GET", path, authorized=False)[0])
+        for path in ("/v1/config", "/v1/room", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/blink"):
+            with self.subTest(path=path):
+                self.assertEqual(401, request("POST", path, {}, authorized=False)[0])
+        with patch.object(self.udp, "request", side_effect=AssertionError("GET is a cached manager snapshot")):
+            self.assertEqual([BULB], request("GET", "/v1/status")[1]["config"]["bulbs"])
+        self.assertEqual(400, request("POST", "/v1/config", self.config | {"bulbs": []})[0])
+        self.udp.found = {MAC: BULB["ip"]}
+        self.assertEqual(MAC, request("POST", "/v1/discover", {})[1]["discovered"][0]["mac"])
+        self.assertEqual(200, request("POST", "/v1/bulbs/add", BULB | {"room": "Kitchen"})[0])
+        with patch("wiz_butler.time.sleep"):
+            self.assertEqual(200, request("POST", "/v1/bulbs/blink", {"mac": MAC})[0])
+        self.assertEqual(400, request("POST", "/v1/bulbs/blink", {"mac": "unknown"})[0])
+        self.assertEqual(200, request("POST", "/v1/bulbs/remove", {"mac": MAC})[0])
+        self.assertEqual(400, request("POST", "/v1/bulbs/remove", {"mac": MAC})[0])
 
     def test_http_auth_and_configuration(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.butler, "x" * 32))

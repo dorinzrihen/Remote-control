@@ -6,7 +6,7 @@ import com.dorin.remote.tizen.SamsungClient
 import com.dorin.remote.webos.WebOsClient
 import com.dorin.remote.wiz.Lights
 
-/** Holds the device clients for the whole process so the sleep-timer service and the night-lights alarm can use them too. */
+/** Holds device clients for the process and the TV sleep-timer service. */
 class App : Application() {
     lateinit var prefs: Prefs
     lateinit var lg: WebOsClient
@@ -18,11 +18,11 @@ class App : Application() {
         super.onCreate()
         instance = this
         prefs = Prefs(this)
+        NightLightsReceiver.cancelLegacyAlarm(this)
         lg = WebOsClient { key -> prefs.lgKey = key }
         atv = AtvClient(this)
         samsung = SamsungClient(this) { token -> prefs.samsungToken = token }
         lights = Lights(prefs)
-        NightLightsReceiver.schedule(this)
     }
 
     companion object {

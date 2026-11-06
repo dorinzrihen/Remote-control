@@ -1,0 +1,194 @@
+package com.dorin.remote
+
+import com.dorin.remote.wiz.ButlerClient
+import com.dorin.remote.wiz.LightMode
+import com.dorin.remote.wiz.Lights
+import java.io.File
+import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.*
+import org.junit.Test
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+
+/** All lighting tests use fake manager responses or loopback HTTP, never WiZ UDP. */
+class ManagerLightsTest {
+    private val mac = "aabbccddeeff"
+    private fun status(enabled: Boolean = true, on: Boolean = true): JSONObject = JSONObject()
+        .put("config", ButlerClient.config(enabled, "22:15", "07:45", "Asia/Jerusalem")
+            .put("bulbs", JSONArray().put(JSONObject().put("mac", mac).put("ip", "192.168.1.20").put("room", "Manager room"))))
+        .put("pilots", JSONObject().put(mac, JSONObject().put("mac", mac).put("state", on).put("dimming", 20).put("temp", 2700)))
+        .put("systemConfigs", JSONObject().put(mac, JSONObject().put("mac", mac).put("moduleName", "ESP24_SHRGBC_01").put("fwVersion", "1.29.0")))
+        .put("errors", JSONObject())
+        .put("observedAt", JSONObject().put(mac, System.currentTimeMillis() / 1000.0))
+        .put("statusAt", System.currentTimeMillis() / 1000.0)
+
+    @Test fun bootstrapOnlyReadsAndAdoptsExistingManagerBulbs() = runBlocking {
+        val calls = mutableListOf<String>()
+        val lights = Lights { path, body ->
+            calls += path
+            assertNull(body)
+            status()
+        }
+        assertTrue(lights.bulbs.value.isEmpty())
+        assertFalse(lights.loaded.value)
+        lights.refresh()
+        assertEquals(listOf("/v1/status"), calls)
+        assertEquals("Manager room", lights.bulbs.value.single().room)
+        assertEquals("22:15", lights.config.value!!.getString("night"))
+        assertEquals(LightMode.NIGHT, LightMode.of(lights.pilots.value.getValue(mac)))
+        assertEquals("1.29.0", lights.systemConfigs.value.getValue(mac).fwVersion)
+    }
+
+    @Test fun emptyManagerResponseIsAuthoritativeRatherThanMergingPhoneCache() = runBlocking {
+        val lights = Lights { _, _ -> status().apply { getJSONObject("config").put("bulbs", JSONArray()) } }
+        lights.acceptStatus(status())
+        lights.refresh()
+        assertTrue(lights.bulbs.value.isEmpty())
+        assertTrue(lights.pilots.value.isEmpty())
+        assertTrue(lights.systemConfigs.value.isEmpty())
+    }
+
+    @Test fun statusRejectsMismatchedIdentitiesAndExposesManagerErrors() {
+        val snapshot = status()
+        snapshot.getJSONObject("pilots").getJSONObject(mac).put("mac", "000000000000")
+        snapshot.getJSONObject("systemConfigs").getJSONObject(mac).put("mac", "000000000000")
+        snapshot.getJSONObject("errors").put(mac, "MAC mismatch")
+        val lights = Lights { _, _ -> snapshot }
+        lights.acceptStatus(snapshot)
+        assertTrue(lights.pilots.value.isEmpty())
+        assertTrue(lights.systemConfigs.value.isEmpty())
+        assertTrue(lights.error.value!!.contains("MAC mismatch"))
+    }
+
+    @Test fun staleManagerObservationsAreNotPresentedAsCurrentOnState() {
+        val snapshot = status().put("statusAt", 1000.0).put("observedAt", JSONObject().put(mac, 970.0))
+        val lights = Lights { _, _ -> snapshot }
+        lights.acceptStatus(snapshot)
+        assertTrue(lights.pilots.value.isEmpty())
+        assertEquals(30, lights.observationAges.value.getValue(mac))
+        assertTrue(lights.error.value!!.contains("stale"))
+    }
+
+    @Test fun allManualModesUseManagerEvenWithTimetableDisabled() = runBlocking {
+        val modes = mutableListOf<String>()
+        val calls = mutableListOf<String>()
+        val lights = Lights { path, body ->
+            calls += path
+            if (path == "/v1/room") {
+                assertEquals("Manager room", body!!.getString("room"))
+                modes += body.getString("mode")
+                JSONObject().put("answered", 1).put("total", 1)
+            } else {
+                assertEquals("/v1/status", path)
+                assertNull(body)
+                status(enabled = false)
+            }
+        }
+        lights.acceptStatus(status(enabled = false))
+        lights.setRoom("Manager room", LightMode.REGULAR)
+        lights.setRoom("Manager room", LightMode.NIGHT)
+        lights.setRoom("Manager room", null)
+        lights.command("Manager room", "TOGGLE")
+        lights.command("Manager room", "ON")
+        lights.command("Manager room", "AUTO")
+        assertEquals(listOf("REGULAR", "NIGHT", "OFF", "TOGGLE", "ON", "AUTO"), modes)
+        assertEquals(6, calls.count { it == "/v1/status" })
+        assertEquals(12, calls.size)
+    }
+
+    @Test fun discoveryAddRemoveAndBlinkGoOnlyThroughManager() = runBlocking {
+        val calls = mutableListOf<String>()
+        val lights = Lights { path, body ->
+            calls += path
+            assertNotNull(body)
+            when (path) {
+                "/v1/discover" -> JSONObject().put("status", status()).put("discovered", JSONArray().put(
+                    JSONObject().put("mac", mac).put("ip", "192.168.1.20").put("pilot", status().getJSONObject("pilots").getJSONObject(mac))))
+                "/v1/bulbs/add" -> {
+                    assertEquals(mac, body!!.getString("mac"))
+                    assertEquals("Kitchen", body.getString("room"))
+                    status()
+                }
+                "/v1/bulbs/remove", "/v1/bulbs/blink" -> {
+                    assertEquals(mac, body!!.getString("mac"))
+                    assertFalse(body.has("ip"))
+                    status()
+                }
+                else -> throw AssertionError("Unexpected transport: $path")
+            }
+        }
+        assertEquals(mac, lights.discover().getValue("192.168.1.20").mac)
+        lights.add(mac, "192.168.1.20", "Kitchen")
+        lights.blink(mac)
+        lights.remove(mac)
+        assertEquals(listOf("/v1/discover", "/v1/bulbs/add", "/v1/bulbs/blink", "/v1/bulbs/remove"), calls)
+    }
+
+    @Test fun failedManagerNeverFallsBackAndClearsStaleOnState() = runBlocking {
+        val calls = mutableListOf<String>()
+        val lights = Lights { path, _ -> calls += path; throw IllegalStateException("Connection refused") }
+        lights.acceptStatus(status())
+        try { lights.refresh(); fail("Expected offline error") } catch (_: IllegalStateException) { }
+        assertFalse(lights.loaded.value)
+        assertTrue(lights.pilots.value.isEmpty())
+        assertEquals(1, lights.bulbs.value.size) // last manager list, explicitly status unknown
+        assertTrue(lights.error.value!!.contains("No direct bulb command"))
+        try { lights.setRoom("Manager room", LightMode.NIGHT); fail("Expected command error") } catch (_: IllegalStateException) { }
+        assertEquals(listOf("/v1/status", "/v1/room"), calls)
+    }
+
+    @Test fun zeroAcknowledgementsAreNotReportedAsSuccess() = runBlocking {
+        val lights = Lights { path, _ ->
+            if (path == "/v1/room") JSONObject().put("answered", 0).put("total", 1).put("errors", JSONObject().put(mac, "MAC mismatch"))
+            else status()
+        }
+        try { lights.command("Manager room", "ON"); fail("Expected explicit manager error") }
+        catch (e: IllegalStateException) { assertTrue(e.message!!.contains("MAC mismatch")) }
+    }
+
+    @Test fun httpRequestsAuthenticateEveryEndpointAndExposeServerErrors() = runBlocking {
+        val token = "x".repeat(32)
+        val server = MockWebServer()
+        repeat(6) { server.enqueue(MockResponse().setBody("{}")) }
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":"MAC mismatch"}"""))
+        server.start()
+        try {
+            val url = server.url("/").toString()
+            ButlerClient.exchange(url, token, "/v1/status")
+            for (path in listOf("/v1/config", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/blink")) {
+                ButlerClient.exchange(url, token, path, JSONObject())
+            }
+            try { ButlerClient.exchange(url, token, "/v1/room", JSONObject()); fail("Expected server error") }
+            catch (e: IllegalStateException) { assertEquals("MAC mismatch", e.message) }
+            assertEquals(7, server.requestCount)
+            val requests = (0 until 7).map { server.takeRequest() }
+            assertEquals("GET", requests.first().method)
+            assertEquals("/v1/status", requests.first().path)
+            assertTrue(requests.drop(1).all { it.method == "POST" })
+            requests.forEach { assertEquals("Bearer $token", it.getHeader("Authorization")) }
+        } finally { server.shutdown() }
+    }
+
+    @Test fun androidLightingHasNoUdpTransportOrActivePhoneScheduler() {
+        val main = File("src/main")
+        val lighting = File(main, "java/com/dorin/remote/wiz").walkTopDown().filter { it.extension == "kt" }.joinToString("\n") { it.readText() }
+        for (forbidden in listOf("DatagramSocket", "DatagramPacket", "38899", "Wiz.request", "Wiz.getPilot", "Wiz.discover", "nightIfOn")) {
+            assertFalse("Android lighting contains $forbidden", lighting.contains(forbidden))
+        }
+        val receiver = File(main, "java/com/dorin/remote/NightLightsReceiver.kt").readText()
+        assertTrue(receiver.contains("FLAG_NO_CREATE"))
+        assertTrue(receiver.contains(".cancel(old)"))
+        assertFalse(receiver.contains(".schedule("))
+        assertFalse(receiver.contains(".lights"))
+        assertFalse(receiver.contains(".setExact"))
+        val manifest = File(main, "AndroidManifest.xml").readText()
+        assertFalse(manifest.contains("EXACT_ALARM"))
+        assertFalse(manifest.contains("BOOT_COMPLETED"))
+        assertTrue(manifest.contains("MY_PACKAGE_REPLACED"))
+        val sheet = File(main, "java/com/dorin/remote/ui/BulbsSheet.kt").readText()
+        assertTrue(sheet.contains("delay(1_000)"))
+        assertFalse(sheet.contains("autoNight"))
+    }
+}

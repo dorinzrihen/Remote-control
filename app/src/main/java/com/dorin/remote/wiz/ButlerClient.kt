@@ -1,6 +1,5 @@
 package com.dorin.remote.wiz
 
-import com.dorin.remote.Prefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -8,20 +7,18 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/** Explicitly configured LAN fallback, not WiZ cloud access or native Rhythms. */
+/** Authenticated connection to the sole lighting manager, never a UDP fallback. */
 object ButlerClient {
     private val http = OkHttpClient.Builder().connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(35, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false).build()
 
-    fun config(enabled: Boolean, night: String, morning: String, timezone: String, bulbs: List<Bulb>, pollSeconds: Int = 1): JSONObject =
+    fun config(enabled: Boolean, night: String, morning: String, timezone: String, pollSeconds: Int = 1): JSONObject =
         JSONObject().put("enabled", enabled).put("night", night).put("morning", morning).put("timezone", timezone)
             .put("pollSeconds", pollSeconds)
-            .put("bulbs", JSONArray(bulbs.map { JSONObject().put("mac", it.mac).put("ip", it.ip).put("room", it.room) }))
 
     fun validateConnection(url: String, token: String) {
         val base = url.trim().trimEnd('/').toHttpUrl()
@@ -43,7 +40,4 @@ object ButlerClient {
         }
     }
 
-    suspend fun room(prefs: Prefs, room: String, mode: String): Int = exchange(
-        prefs.butlerUrl, prefs.butlerToken, "/v1/room", JSONObject().put("room", room).put("mode", mode),
-    ).getInt("answered")
 }

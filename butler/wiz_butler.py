@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in, LAN-only WiZ timetable fallback. Python 3.11+, standard library only."""
+"""Authoritative LAN WiZ manager. Python 3.11+, standard library only."""
 
 import argparse
 import hmac
@@ -139,6 +139,10 @@ class Butler:
         self.last_discovery = 0
         self.errors = {}
         self.last_poll = None
+        self.observed = {}
+        self.observed_at = {}
+        self.system_configs = {}
+        self.discovered = {}
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,10 +154,14 @@ class Butler:
         temporary.replace(self.path)
 
     def configure(self, value):
-        config = validate_config(value)
         with self.lock:
-            # Preserve manual holds when re-saving settings; do not flash/apply
-            # a new preset just because a phone uploads its bulb list.
+            # Bulbs have dedicated add/remove operations. In particular an old
+            # or newly installed phone must never erase this manager's list.
+            if "bulbs" in value and value["bulbs"] != self.config["bulbs"]:
+                raise ValueError("Manager owns the bulb list; use bulb add/remove, not config")
+            config = validate_config(value | {"bulbs": self.config["bulbs"]})
+            # Preserve holds, observations and known addresses. Saving a
+            # timetable is not a lighting action or a discovery reset.
             old_config = self.config
             self.config = config
             try:
@@ -163,10 +171,103 @@ class Butler:
                 raise
             self.previous.clear()
             self.last_boundary = None
-            self.addresses.clear()
-            self.last_discovery = 0
-            self.errors.clear()
             self.changed.set()
+
+    def rediscover(self):
+        found = {}
+        for mac, ip in self.udp.discover().items():
+            try:
+                bulb = validate_config(self.config | {"bulbs": [{"mac": mac, "ip": ip, "room": "Discovered"}]})["bulbs"][0]
+            except (ValueError, TypeError):
+                continue
+            found[bulb["mac"]] = bulb["ip"]
+        self.addresses.update(found)
+        return found
+
+    def discover(self):
+        with self.lock:
+            found = self.rediscover()
+            result = []
+            for mac, ip in found.items():
+                bulb = {"mac": mac, "ip": ip, "room": "Discovered"}
+                pilot = self.pilot(bulb)
+                if pilot is None:
+                    continue
+                self.discovered[mac] = bulb
+                self.read_system_config(bulb)
+                result.append({"mac": mac, "ip": ip, "pilot": pilot,
+                               "systemConfig": self.system_configs.get(mac)})
+            return {"discovered": result, "status": self.status()}
+
+    def add_bulb(self, value):
+        with self.lock:
+            bulb = validate_config(self.config | {"bulbs": [value]})["bulbs"][0]
+            if self.pilot(bulb) is None:
+                raise ValueError("Bulb did not answer with the expected MAC; discover again")
+            old = self.config
+            self.config = validate_config(self.config | {"bulbs": [b for b in self.config["bulbs"] if b["mac"] != bulb["mac"]] + [bulb]})
+            try:
+                self.save()
+            except OSError:
+                self.config = old
+                raise
+            # Do not interpret adding an already-on bulb as a wall-switch event.
+            self.previous.pop(bulb["mac"], None)
+            self.read_system_config(bulb)
+            self.changed.set()
+            return self.status()
+
+    def remove_bulb(self, mac):
+        with self.lock:
+            if not isinstance(mac, str) or not any(b["mac"] == mac for b in self.config["bulbs"]):
+                raise ValueError("Bulb is not configured on the manager")
+            old, holds = self.config, dict(self.holds)
+            self.config = self.config | {"bulbs": [b for b in self.config["bulbs"] if b["mac"] != mac]}
+            self.holds.pop(mac, None)
+            try:
+                self.save()
+            except OSError:
+                self.config, self.holds = old, holds
+                raise
+            for cache in (self.previous, self.observed, self.observed_at, self.errors, self.system_configs):
+                cache.pop(mac, None)
+            return self.status()
+
+    def read_system_config(self, bulb):
+        result = self.udp.request(self.addresses.get(bulb["mac"], bulb["ip"]), "getSystemConfig", {})
+        if isinstance(result, dict) and isinstance(result.get("mac"), str) and result["mac"].lower() == bulb["mac"]:
+            self.system_configs[bulb["mac"]] = result
+
+    def blink(self, mac):
+        with self.lock:
+            bulb = next((b for b in self.config["bulbs"] if b["mac"] == mac), self.discovered.get(mac) if isinstance(mac, str) else None)
+            if bulb is None:
+                raise ValueError("Unknown bulb; discover through the manager first")
+            original = self.pilot(bulb)
+            if original is None:
+                raise ValueError("Bulb unreachable or MAC mismatch; no blink sent")
+            # All flashes/restores share the scheduler lock. Preserve colour,
+            # brightness, power and any existing manual hold; no timetable race.
+            restore = {k: original[k] for k in ("state", "sceneId", "temp", "dimming", "r", "g", "b", "w", "c") if k in original}
+            needs_restore = False
+            try:
+                for _ in range(2):
+                    needs_restore = True
+                    if not self.write(bulb, "setPilot", {"state": not original["state"]}):
+                        raise ValueError("Blink was not acknowledged")
+                    time.sleep(0.3)
+                    if not self.write(bulb, "setPilot", restore):
+                        raise ValueError("Blink restore was not acknowledged; check bulb state")
+                    needs_restore = False
+                    time.sleep(0.3)
+            finally:
+                # Also attempt restoration after a lost flash acknowledgement.
+                restored = not needs_restore or self.write(bulb, "setPilot", restore)
+                self.previous.pop(mac, None)
+                self.pilot(bulb)
+                if not restored:
+                    raise ValueError("Blink restore failed (unreachable, MAC mismatch or no acknowledgement); check bulb state")
+            return self.status()
 
     def poll_delay(self, now, elapsed=0):
         """Poll at the configured interval, but wake for a schedule boundary too."""
@@ -182,13 +283,20 @@ class Butler:
         ip = self.addresses.get(bulb["mac"], bulb["ip"])
         pilot = self.udp.request(ip, "getPilot", {})
         # Never send a write to an IP reassigned to a different bulb.
-        if not isinstance(pilot, dict) or pilot.get("mac", "").lower() != bulb["mac"] or type(pilot.get("state")) is not bool:
+        if not isinstance(pilot, dict) or not isinstance(pilot.get("mac"), str) or pilot["mac"].lower() != bulb["mac"] or type(pilot.get("state")) is not bool:
             self.errors[bulb["mac"]] = "unreachable or MAC mismatch"
+            self.observed.pop(bulb["mac"], None)
             return None
         self.errors.pop(bulb["mac"], None)
+        self.observed[bulb["mac"]] = pilot
+        self.observed_at[bulb["mac"]] = time.time()
         return pilot
 
-    def write(self, bulb, method, params):
+    def write(self, bulb, method, params, only_if_on=False):
+        # Every write, including blink restoration, verifies identity afresh.
+        current = self.pilot(bulb)
+        if current is None or (only_if_on and not current["state"]):
+            return False
         result = self.udp.request(self.addresses.get(bulb["mac"], bulb["ip"]), method, params)
         ok = isinstance(result, dict) and result.get("success") is True
         if not ok:
@@ -204,19 +312,17 @@ class Butler:
         current = self.pilot(bulb)
         if current is None or not current["state"]:
             return False
-        ok = self.write(bulb, "setPilot", MODES[mode])
+        ok = self.write(bulb, "setPilot", MODES[mode], only_if_on=True)
         if ok:
             logging.info("Timetable %s -> …%s", mode, bulb["mac"][-4:])
         return ok
 
     def tick(self, now):
         with self.lock:
-            if not self.config["enabled"]:
-                return
             self.last_poll = now
             if now - self.last_discovery >= 60:
                 try:
-                    self.addresses.update(self.udp.discover())
+                    self.rediscover()
                 except OSError:
                     logging.warning("Discovery failed; retaining known addresses")
                 self.last_discovery = now
@@ -226,9 +332,13 @@ class Butler:
             for bulb in self.config["bulbs"]:
                 mac = bulb["mac"]
                 current = self.pilot(bulb)
+                if mac not in self.system_configs:
+                    self.read_system_config(bulb)
                 known = mac in self.previous
                 previous = self.previous.get(mac)
                 self.previous[mac] = current
+                if not self.config["enabled"]:
+                    continue
                 if current is None or not current["state"]:
                     continue
                 # External colour/brightness changes while on are manual too.
@@ -252,8 +362,8 @@ class Butler:
         if not isinstance(room, str) or mode not in (*MODES, "OFF", "AUTO", "ON", "TOGGLE"):
             raise ValueError("Expected room and REGULAR, NIGHT, OFF, ON, AUTO or TOGGLE mode")
         with self.lock:
-            if not self.config["enabled"]:
-                raise ValueError("Butler timetable is disabled; save settings in the remote")
+            if mode == "AUTO" and not self.config["enabled"]:
+                raise ValueError("Timetable is disabled; enable it before resuming")
             bulbs = [b for b in self.config["bulbs"] if b["room"] == room]
             if not bulbs:
                 raise ValueError("Room is not configured on the butler")
@@ -263,14 +373,19 @@ class Butler:
             if mode == "TOGGLE":
                 mode = "OFF" if any(p and p["state"] for p in pilots.values()) else "ON"
             current_mode, _, following = schedule(self.config, now)
+            old_holds = dict(self.holds)
             for bulb in bulbs:
-                if mode in ("AUTO", "ON"):
+                if mode == "AUTO":
                     self.holds.pop(bulb["mac"], None)
                 else:
                     self.holds[bulb["mac"]] = following
             # Persist intent before writing, so restart or a lost UDP reply
             # cannot cause the scheduler to undo a manual action.
-            self.save()
+            try:
+                self.save()
+            except OSError:
+                self.holds = old_holds
+                raise
             ok = 0
             for bulb in bulbs:
                 pilot = pilots[bulb["mac"]]
@@ -285,12 +400,19 @@ class Butler:
                 if success:
                     ok += 1
                 self.previous.pop(bulb["mac"], None)
-            return {"answered": ok, "total": len(bulbs)}
+                if success:
+                    self.pilot(bulb)
+            return {"answered": ok, "total": len(bulbs), "errors": dict(self.errors)}
 
     def status(self):
         with self.lock:
-            return {"config": self.config, "holds": dict(self.holds), "errors": dict(self.errors),
-                    "lastPoll": self.last_poll, "native": False}
+            bulbs = [b | {"ip": self.addresses.get(b["mac"], b["ip"])} for b in self.config["bulbs"]]
+            saved = {b["mac"] for b in bulbs}
+            return {"config": self.config | {"bulbs": bulbs}, "holds": dict(self.holds), "errors": dict(self.errors),
+                    "pilots": {mac: p for mac, p in self.observed.items() if mac in saved},
+                    "systemConfigs": {mac: c for mac, c in self.system_configs.items() if mac in saved},
+                    "observedAt": {mac: at for mac, at in self.observed_at.items() if mac in saved},
+                    "lastPoll": self.last_poll, "statusAt": time.time(), "native": False}
 
 
 def handler(butler, token):
@@ -316,7 +438,7 @@ def handler(butler, token):
         def do_GET(self):
             if not self.authorized():
                 return
-            if self.path != "/v1/config":
+            if self.path not in ("/v1/config", "/v1/status"):
                 self.respond(404, {"error": "Not found"})
                 return
             self.respond(200, butler.status())
@@ -336,6 +458,14 @@ def handler(butler, token):
                     self.respond(200, butler.status())
                 elif self.path == "/v1/room":
                     self.respond(200, butler.command(value.get("room"), value.get("mode"), time.time()))
+                elif self.path == "/v1/discover":
+                    self.respond(200, butler.discover())
+                elif self.path == "/v1/bulbs/add":
+                    self.respond(200, butler.add_bulb(value))
+                elif self.path == "/v1/bulbs/remove":
+                    self.respond(200, butler.remove_bulb(value.get("mac")))
+                elif self.path == "/v1/bulbs/blink":
+                    self.respond(200, butler.blink(value.get("mac")))
                 else:
                     self.respond(404, {"error": "Not found"})
             except (ValueError, TypeError) as error:
