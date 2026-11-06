@@ -4,6 +4,13 @@ The lighting API intentionally trusts access to the configured home LAN. No
 lighting password/token, six-digit code or identity challenge is used. This is
 unrelated to TV pairing or OpenCode/Tailscale authentication.
 
+`Connected · 2 bulbs` means the manager API is reachable, not that both bulbs
+respond. A successful manager response with zero bulb acknowledgements is a
+bulb-level failure: the app reports the affected room and keeps manager status
+connected. Unconfirmed requests do not claim that the manager is down or that
+the command was never applied. Regression tests simulate these cases without
+sending real light commands.
+
 Run fake-bulb/HTTP tests (no hardware writes):
 
 ```sh

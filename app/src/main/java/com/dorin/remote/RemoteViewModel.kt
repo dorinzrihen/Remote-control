@@ -19,6 +19,7 @@ import com.dorin.remote.webos.LgState
 import com.dorin.remote.wiz.LightMode
 import com.dorin.remote.wiz.ButlerClient
 import com.dorin.remote.wiz.Pilot
+import com.dorin.remote.wiz.lightingCommandFailure
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -704,7 +705,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val ok = lights.command(room, "AUTO")
                 say("$room: $ok bulb(s) returned to timetable; off bulbs stay off")
-            } catch (e: Exception) { say("Butler unavailable: ${e.message}") }
+            } catch (e: Exception) { say(lightingCommandFailure(e)) }
         }
     }
 
@@ -713,7 +714,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val total = lights.bulbs.value.count { it.room == room }
             val ok = try { lights.setRoom(room, mode) }
-                catch (e: Exception) { say("Butler unavailable; no direct command sent. ${e.message}"); return@launch }
+                catch (e: Exception) { say(lightingCommandFailure(e)); return@launch }
             if (ok == 0) say("$room: bulbs did not answer the manager. Check the manager LAN and wall switches.")
             else if (ok < total) say("$room: ${total - ok} of $total bulbs did not answer")
         }
@@ -726,7 +727,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
                 val ok = lights.command(room, "TOGGLE")
                 val total = lights.bulbs.value.count { it.room == room }
                 if (ok < total) say("$room: ${total - ok} of $total bulbs did not answer")
-            } catch (e: Exception) { say("Manager command failed: ${e.message}") }
+            } catch (e: Exception) { say(lightingCommandFailure(e)) }
         }
     }
 

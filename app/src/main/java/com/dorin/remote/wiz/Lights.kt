@@ -104,7 +104,8 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
         val result = exchange("/v1/room", JSONObject().put("room", room).put("mode", mode))
         refresh()
         val ok = result.getInt("answered")
-        check(ok > 0) { result.optJSONObject("errors")?.toString() ?: "No bulbs acknowledged the manager command" }
+        if (ok == 0) throw BulbsDidNotAnswer(room, result.optJSONObject("errors")?.toString() ?: "No bulbs acknowledged the manager command")
+        check(ok > 0) { "Invalid acknowledgement count from the lighting manager" }
         return ok
     }
 

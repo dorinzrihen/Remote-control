@@ -3,6 +3,8 @@ package com.dorin.remote
 import com.dorin.remote.wiz.ButlerClient
 import com.dorin.remote.wiz.LightMode
 import com.dorin.remote.wiz.Lights
+import com.dorin.remote.wiz.BulbsDidNotAnswer
+import com.dorin.remote.wiz.lightingCommandFailure
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -140,12 +142,37 @@ class ManagerLightsTest {
     }
 
     @Test fun zeroAcknowledgementsAreNotReportedAsSuccess() = runBlocking {
+        val calls = mutableListOf<String>()
+        val snapshot = status().apply {
+            getJSONObject("pilots").remove(mac)
+            getJSONObject("errors").put(mac, "MAC mismatch")
+        }
         val lights = Lights { path, _ ->
+            calls += path
             if (path == "/v1/room") JSONObject().put("answered", 0).put("total", 1).put("errors", JSONObject().put(mac, "MAC mismatch"))
-            else status()
+            else snapshot
         }
         try { lights.command("Manager room", "ON"); fail("Expected explicit manager error") }
-        catch (e: IllegalStateException) { assertTrue(e.message!!.contains("MAC mismatch")) }
+        catch (e: BulbsDidNotAnswer) {
+            assertTrue(e.message!!.contains("MAC mismatch"))
+            assertEquals("Manager room", e.room)
+            val feedback = lightingCommandFailure(e)
+            assertTrue(feedback.startsWith("Manager connected."))
+            assertTrue(feedback.contains("Manager room: no bulbs answered"))
+            assertFalse(feedback.contains("unavailable"))
+        }
+        assertEquals(listOf("/v1/room", "/v1/status"), calls)
+        assertTrue(lights.loaded.value)
+        assertTrue(lights.pilots.value.isEmpty())
+        assertTrue(lights.error.value!!.contains("MAC mismatch"))
+    }
+
+    @Test fun unconfirmedCommandDoesNotClaimTheManagerIsDownOrThatNothingWasSent() {
+        val feedback = lightingCommandFailure(java.io.IOException("Read timed out"))
+        assertTrue(feedback.contains("not confirmed"))
+        assertTrue(feedback.contains("Read timed out"))
+        assertFalse(feedback.contains("unavailable"))
+        assertFalse(feedback.contains("no direct command sent"))
     }
 
     @Test fun httpRequestsNeedNoCredentialsForAnyEndpointAndExposeServerErrors() = runBlocking {
