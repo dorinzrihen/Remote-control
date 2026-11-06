@@ -45,3 +45,9 @@ Protocol unit tests (compared against the official Python protobuf library): `./
 To review before publishing, build the separate **UniRemote Preview** app with
 `./gradlew assembleDebug`. It installs beside the normal app without replacing it.
 See [phone testing and emulator screenshots](docs/testing.md).
+
+## Local Android development
+
+Run `just emulator dev` to build and open Preview on the persistent, visible
+Pixel 8a emulator; rerun to update it without losing settings. Stop it with
+`just emulator stop`. See [setup and platform notes](docs/emulator.md).
