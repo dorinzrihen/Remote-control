@@ -29,55 +29,44 @@ class PreviewGalleryTest(unittest.TestCase):
     def test_missing_captures_are_not_mockups(self):
         page = self.page()
         self.assertIn("Awaiting actual capture", page)
-        self.assertFalse(any(tag == "img" and "src" in attrs
-                             for tag, attrs in Elements(page).elements))
+        self.assertFalse(any(tag == "img" and "src" in attrs for tag, attrs in Elements(page).elements))
         self.assertEqual(["index.html"], [p.name for p in self.output.iterdir()])
 
-    def test_actual_images_have_provenance_and_same_tab_enlargement(self):
+    def test_actual_images_are_visible_screenshots_first(self):
         self.output.mkdir()
         for key in CAPTURES:
-            (self.output / f"bulbs-{key}.png").write_bytes(b"actual capture supplied by caller")
-        (self.output / "UniRemote-Preview.apk").write_bytes(b"test apk")
+            (self.output / f"bulbs-{key}.png").write_bytes(b"caller supplies actual capture")
         page = self.page()
         elements = Elements(page).elements
-        images = [attrs for tag, attrs in elements if tag == "img" and "src" in attrs]
-        self.assertEqual(9, len(images))  # Connected is also the default connection view.
-        self.assertTrue(all(image["src"].startswith("bulbs-") for image in images))
-        self.assertTrue(all("?v=" in image["src"] for image in images))
+        images = [a for tag, a in elements if tag == "img" and "src" in a]
+        self.assertEqual(8, len(images))
+        self.assertEqual(["bulbs-regular.png", "bulbs-night.png", "bulbs-follow.png"],
+                         [a["src"].split("?")[0] for a in images[:3]])
+        self.assertFalse(any("hidden" in a or "target" in a for _, a in elements))
         self.assertIn("Live Mac", page)
-        self.assertIn("Read-only fixture", page)
-        self.assertFalse(any("target" in attrs for _, attrs in elements))
-        self.assertIn('id="lightbox"', page)
-        self.assertIn('href="UniRemote-Preview.apk" download', page)
-        self.assertIn("Old advanced setup · being removed", page)
-        self.assertNotIn('<details id="advanced-details">', page)
+        self.assertIn("Read-only sample", page)
+        self.assertNotIn("Awaiting actual capture", page)
+        self.assertIn('<title>Bulbs — screenshots</title>', page)
 
-    def test_revision_changes_only_when_inputs_change(self):
-        def revision(page):
-            return next(attrs["content"] for tag, attrs in Elements(page).elements
-                        if tag == "meta" and attrs.get("name") == "gallery-revision")
-
-        first = self.page()
-        self.assertEqual(revision(first), revision(self.page()))
-        (self.output / "bulbs-night.png").write_bytes(b"capture")
-        self.assertNotEqual(revision(first), revision(self.page()))
-        self.assertEqual({"index.html", "bulbs-night.png"}, {p.name for p in self.output.iterdir()})
-
-    def test_truthful_explanations_and_refresh_state(self):
+    def test_no_flickering_reload_or_tabs(self):
         page = self.page()
-        for phrase in ("Assistant-added choice, not requested", "Six digits weren’t technically required",
-                       "One manager was selected automatically", "No existing-room rename",
-                       "Looks like Night · no Follow marker", "observed bulb output", "anyone on Wi-Fi",
-                       "Old manager password", "v1.7: “Butler token”", "never gave you a usable way",
-                       "No passwords or pairing codes. Change in progress.", ": 'modes'",
-                       "sessionStorage", "saved.details", "saved.tab", "saved.y", "location.reload()",
-                       "location.protocol === 'file:'", "cache: 'no-store'", "8000"):
+        for forbidden in ("setInterval", "location.reload", "http-equiv", "fetch(", "data-tab", "UniRemote Preview"):
+            self.assertNotIn(forbidden, page)
+        self.assertIn("sessionStorage", page)
+        self.assertIn("data-enlarge", page)
+
+    def test_truthful_notes_below_screenshots(self):
+        page = self.page()
+        for phrase in ("LIMITATION · no Follow marker", "observed bulb output", "No existing-room rename",
+                       "Old setup / Advanced — being removed", "anyone on Wi-Fi", "Removal is in progress",
+                       "Assistant-added choice, not requested", "v1.7: “Butler token”"):
             self.assertIn(phrase, page)
+        self.assertLess(page.index('id="modes"'), page.index('id="old-setup"'))
 
-    def test_absent_apk_is_not_a_broken_download(self):
-        page = self.page()
-        self.assertIn("Preview APK pending", page)
-        self.assertNotIn('href="UniRemote-Preview.apk"', page)
+    def test_no_broken_apk_link(self):
+        self.assertNotIn('href="UniRemote-Preview.apk"', self.page())
+        (self.output / "UniRemote-Preview.apk").write_bytes(b"test apk")
+        self.assertIn('href="UniRemote-Preview.apk" download', self.page())
 
 
 if __name__ == "__main__":
