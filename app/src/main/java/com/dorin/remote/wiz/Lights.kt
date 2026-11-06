@@ -68,7 +68,9 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
                 if (settings.has("enabled")) settings.getBoolean("enabled") else null,
                 holds, if (status.has("statusAt")) status.optDouble("statusAt", Double.NaN) else null)
         }
-        val reported = errors.keys().asSequence().map { "…${it.takeLast(4)}: ${errors.getString(it)}" }.toList()
+        // A bulb switched off at the wall simply stops answering; its room card says so.
+        val reported = errors.keys().asSequence().filter { errors.getString(it) != "unreachable or MAC mismatch" }
+            .map { "…${it.takeLast(4)}: ${errors.getString(it)}" }.toList()
         val stale = saved.filter { states.has(it.mac) && (observationAges.value[it.mac] ?: Int.MAX_VALUE) > maximumAge }
             .map { "…${it.mac.takeLast(4)}: manager observation stale / age unknown" }
         error.value = (reported + stale).takeIf { it.isNotEmpty() }?.joinToString("; ")

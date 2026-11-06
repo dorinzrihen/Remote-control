@@ -61,7 +61,7 @@ class RoomControlStateTest {
 
     @Test fun unreachableUnavailableAndMissingMetadataMakeNoActiveClaims() {
         assertNull(state(states = pilots().filterKeys { it == macs.first() }).selected)
-        assertTrue(state(states = emptyMap()).status.contains("unreachable"))
+        assertEquals("no power or offline", state(states = emptyMap()).status)
         assertNull(state(loaded = false).selected)
         assertNull(state(holds = null).selected)
         assertNull(state(at = null).selected)

@@ -15,7 +15,7 @@ fun roomControlState(
 ): RoomControlState {
     if (!loaded) return RoomControlState(status = "manager unavailable / status unknown")
     val states = macs.mapNotNull { pilots[it] }
-    if (states.size < macs.size) return RoomControlState(status = "${macs.size - states.size} unreachable / status unknown")
+    if (states.size < macs.size) return RoomControlState(status = if (states.isEmpty()) "no power or offline" else "${macs.size - states.size} with no power or offline")
     if (states.isEmpty()) return RoomControlState(status = "status unknown")
     val physical = states.map { if (!it.on) "off" else LightMode.of(it)?.label ?: "on" }.distinct()
     val appearance = physical.singleOrNull() ?: "Mixed"
