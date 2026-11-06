@@ -11,12 +11,12 @@ final class LightsApplication: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
             let home = FileManager.default.homeDirectoryForCurrentUser
-            let log = home.appendingPathComponent("Library/Logs/com.uniremote.wiz.log")
-            try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: log.path) {
-                FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+            let logURL = home.appendingPathComponent("Library/Logs/com.uniremote.wiz.log")
+            try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: logURL.path) {
+                FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
             }
-            let handle = try FileHandle(forWritingTo: log)
+            let handle = try FileHandle(forWritingTo: logURL)
             try handle.seekToEnd()
             output = handle
             guard let script = Bundle.main.object(forInfoDictionaryKey: "ButlerManagerScript") as? String,
