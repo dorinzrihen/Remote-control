@@ -25,6 +25,7 @@ After that the app checks GitHub Releases on every launch and offers to download
 - **Quick actions** (lightning button): **Bulbs**, sleep timer (15/30/60/90 min, then the TV turns off), and on LG only: brightness slider, picture mode, sound output, sound mode, volume slider, screen off with sound on.
 - **Bulbs** (WiZ, inside Quick actions): set a bulb up in the WiZ app first, then **Find new bulbs** → *Blink* to see which one it is → type the room → *Add*. Each room has an on/off button and two modes: *Regular* (100%, cool white 6500K) and *Night* (20%, warm 2700K). The bulbs are controlled directly over the Wi-Fi (UDP port 38899), not through the WiZ cloud. Keep the wall switch on, or the bulb cannot answer.
 - **Night at 21:00** (on by default): every evening at 21:00 the bulbs that are on switch to Night; bulbs that are off stay off. The on/off button starts in Night between 21:00 and 06:00. Whatever you press after 21:00 stays until the next evening. The phone does this, so it has to be at home on the Wi-Fi at 21:00.
+- **Optional laptop timetable**: edit Night/Day times (including minutes), home timezone and polling interval inside Bulbs. The local manager handles detected wall-switch On correction and manual overrides. It is portable to macOS, **not native WiZ Rhythms**, and off by default. Read the [actual-bulb investigation](docs/wiz-rhythms.md) and [setup/limitations](butler/README.md) before enabling it. Saved bulbs also display their module and firmware using read-only `getSystemConfig`.
 - **Sound** (LG + soundbar over HDMI eARC): sound output (TV + soundbar / soundbar only / TV speaker) and sound mode (AI Sound Pro, Standard, Cinema, Clear Voice, Sports, Music, Game, Bass Blast). With an LG soundbar the TV shares its sound mode with the bar, so these buttons change the soundbar's mode too. Rear-speaker level, woofer level and left/right balance live inside the soundbar and are not reachable through the TV; use the soundbar remote for those.
 - **TV power** turns the TV off, or wakes it with Wake-on-LAN (LG: needs "Quick Start+"; Samsung: needs "Power On with Mobile" / network standby). On Samsung the power key is a toggle.
 
@@ -35,6 +36,9 @@ After that the app checks GitHub Releases on every launch and offers to download
 - App icons arrive from the TV after the first connection and are cached on the phone.
 
 ## Build
+The [release guide](docs/releases.md) explains signing, manual GitHub publishing,
+and how installed phones find updates. There is no automatic release workflow.
+
 ```
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ./gradlew assembleRelease

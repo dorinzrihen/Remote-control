@@ -8,6 +8,11 @@ local.properties
 .idea/
 *.iml
 .DS_Store
+# Private local investigation artifacts (bulb/home IDs and vendor firmware).
+.local/
+# Python utilities/tests
+__pycache__/
+*.py[cod]
 # signing key: keep private (release builds fall back to the debug key without it)
 keystore/
 

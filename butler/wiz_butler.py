@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""Opt-in, LAN-only WiZ timetable fallback. Python 3.11+, standard library only."""
+
+import argparse
+import hmac
+import ipaddress
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import secrets
+import socket
+import threading
+import time
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from zoneinfo import ZoneInfo
+
+MODES = {"REGULAR": {"dimming": 100, "temp": 6500}, "NIGHT": {"dimming": 20, "temp": 2700}}
+DEFAULT_CONFIG = {"enabled": False, "night": "21:00", "morning": "06:00", "timezone": "Asia/Jerusalem", "pollSeconds": 1, "bulbs": []}
+
+
+def validate_config(value):
+    if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
+        raise ValueError("enabled must be a boolean")
+    for key in ("night", "morning"):
+        if not isinstance(value.get(key), str) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value[key]):
+            raise ValueError(f"{key} must be HH:MM")
+    if value["night"] == value["morning"]:
+        raise ValueError("Night and morning must differ")
+    poll_seconds = value.get("pollSeconds", DEFAULT_CONFIG["pollSeconds"])
+    if type(poll_seconds) is not int or not 1 <= poll_seconds <= 300:
+        raise ValueError("Polling interval must be a whole number from 1 to 300 seconds")
+    try:
+        ZoneInfo(value["timezone"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Unknown IANA timezone") from None
+    bulbs = value.get("bulbs")
+    if not isinstance(bulbs, list) or len(bulbs) > 100:
+        raise ValueError("bulbs must be an array of at most 100 bulbs")
+    clean, seen = [], set()
+    for bulb in bulbs:
+        if not isinstance(bulb, dict):
+            raise ValueError("Invalid bulb")
+        mac, ip, room = bulb.get("mac"), bulb.get("ip"), bulb.get("room")
+        if not isinstance(mac, str) or not re.fullmatch(r"[0-9a-fA-F]{12}", mac) or mac.lower() in seen:
+            raise ValueError("Invalid or duplicate MAC")
+        address = ipaddress.IPv4Address(ip)
+        if not address.is_private or address.is_loopback or address.is_multicast or address.is_unspecified or str(address).endswith(".255"):
+            raise ValueError("Bulb IP must be a private LAN unicast IPv4 address")
+        if not isinstance(room, str) or not room.strip() or len(room) > 100:
+            raise ValueError("Invalid room")
+        seen.add(mac.lower())
+        clean.append({"mac": mac.lower(), "ip": str(address), "room": room})
+    return {key: value[key] for key in ("enabled", "night", "morning", "timezone")} | {"pollSeconds": poll_seconds, "bulbs": clean}
+
+
+def schedule(config, now):
+    """Return current mode, last boundary and next boundary as UTC timestamps.
+
+    Resolve ambiguous wall times once (fold=0); normalize nonexistent spring
+    times forward through UTC. Comparing epochs, not local datetimes, avoids
+    repeating a transition when the clock falls back.
+    """
+    tz = ZoneInfo(config["timezone"])
+    day = datetime.fromtimestamp(now, tz).date()
+    boundaries = []
+    for delta in range(-2, 3):
+        for key, mode in (("night", "NIGHT"), ("morning", "REGULAR")):
+            hour, minute = map(int, config[key].split(":"))
+            date = day + timedelta(days=delta)
+            at = datetime(date.year, date.month, date.day, hour, minute, tzinfo=tz).timestamp()
+            boundaries.append((at, mode))
+    previous = max(entry for entry in boundaries if entry[0] <= now)
+    following = min(entry[0] for entry in boundaries if entry[0] > now)
+    return previous[1], previous[0], following
+
+
+def signature(pilot):
+    return tuple(pilot.get(key) for key in ("state", "sceneId", "temp", "dimming", "r", "g", "b", "w", "c"))
+
+
+class Udp:
+    def __init__(self, broadcast):
+        self.broadcast = broadcast
+
+    def request(self, ip, method, params):
+        ident = secrets.randbelow(2**30)
+        packet = json.dumps({"id": ident, "method": method, "params": params}).encode()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((ip, 38899))
+                sock.settimeout(0.7)
+                for _ in range(2):
+                    sock.send(packet)
+                    end = time.monotonic() + 0.7
+                    while time.monotonic() < end:
+                        sock.settimeout(max(0.001, end - time.monotonic()))
+                        try:
+                            reply = json.loads(sock.recv(8192))
+                        except (socket.timeout, ValueError):
+                            break
+                        if isinstance(reply, dict) and reply.get("method") == method and reply.get("id", ident) == ident:
+                            return reply.get("result")
+        except OSError:
+            pass
+        return None
+
+    def discover(self):
+        found = {}
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.settimeout(0.2)
+            sock.sendto(b'{"method":"getSystemConfig","params":{}}', (self.broadcast, 38899))
+            end = time.monotonic() + 1
+            while time.monotonic() < end:
+                try:
+                    data, source = sock.recvfrom(8192)
+                    reply = json.loads(data)
+                    if isinstance(reply, dict) and reply.get("method") == "getSystemConfig":
+                        found[reply["result"]["mac"].lower()] = source[0]
+                except (socket.timeout, ValueError, KeyError, TypeError):
+                    continue
+        return found
+
+
+class Butler:
+    def __init__(self, path, udp):
+        self.path, self.udp = Path(path), udp
+        self.lock = threading.RLock()
+        self.changed = threading.Event()
+        stored = json.loads(self.path.read_text()) if self.path.exists() else {}
+        self.config = validate_config(stored.get("config", DEFAULT_CONFIG))
+        self.holds = stored.get("holds", {})
+        self.previous = {}
+        self.addresses = {}
+        self.last_boundary = None
+        self.last_discovery = 0
+        self.errors = {}
+        self.last_poll = None
+
+    def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        with open(temporary, "w", opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+            json.dump({"config": self.config, "holds": self.holds}, output, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(self.path)
+
+    def configure(self, value):
+        config = validate_config(value)
+        with self.lock:
+            # Preserve manual holds when re-saving settings; do not flash/apply
+            # a new preset just because a phone uploads its bulb list.
+            old_config = self.config
+            self.config = config
+            try:
+                self.save()
+            except OSError:
+                self.config = old_config
+                raise
+            self.previous.clear()
+            self.last_boundary = None
+            self.addresses.clear()
+            self.last_discovery = 0
+            self.errors.clear()
+            self.changed.set()
+
+    def poll_delay(self, now, elapsed=0):
+        """Poll at the configured interval, but wake for a schedule boundary too."""
+        with self.lock:
+            # The configured interval includes work already spent querying:
+            # do not add another full second after slow/unreachable replies.
+            delay = max(0.05, self.config["pollSeconds"] - elapsed)
+            if self.config["enabled"]:
+                delay = min(delay, max(0.05, schedule(self.config, now)[2] - now))
+            return delay
+
+    def pilot(self, bulb):
+        ip = self.addresses.get(bulb["mac"], bulb["ip"])
+        pilot = self.udp.request(ip, "getPilot", {})
+        # Never send a write to an IP reassigned to a different bulb.
+        if not isinstance(pilot, dict) or pilot.get("mac", "").lower() != bulb["mac"] or type(pilot.get("state")) is not bool:
+            self.errors[bulb["mac"]] = "unreachable or MAC mismatch"
+            return None
+        self.errors.pop(bulb["mac"], None)
+        return pilot
+
+    def write(self, bulb, method, params):
+        result = self.udp.request(self.addresses.get(bulb["mac"], bulb["ip"]), method, params)
+        ok = isinstance(result, dict) and result.get("success") is True
+        if not ok:
+            self.errors[bulb["mac"]] = "command not acknowledged"
+        return ok
+
+    def apply(self, bulb, mode):
+        # Live ESP24_SHRGBC_01/1.29.0 testing showed that BOTH setState and
+        # setPilot turn an off bulb on when a preset is supplied. Neither is
+        # an atomic "update only if on" operation. Recheck immediately before
+        # writing; commands from our API are serialized by self.lock. Another
+        # controller can still race this read/write pair (UDP has no CAS).
+        current = self.pilot(bulb)
+        if current is None or not current["state"]:
+            return False
+        ok = self.write(bulb, "setPilot", MODES[mode])
+        if ok:
+            logging.info("Timetable %s -> …%s", mode, bulb["mac"][-4:])
+        return ok
+
+    def tick(self, now):
+        with self.lock:
+            if not self.config["enabled"]:
+                return
+            self.last_poll = now
+            if now - self.last_discovery >= 60:
+                try:
+                    self.addresses.update(self.udp.discover())
+                except OSError:
+                    logging.warning("Discovery failed; retaining known addresses")
+                self.last_discovery = now
+            mode, boundary, following = schedule(self.config, now)
+            crossed = self.last_boundary is not None and boundary != self.last_boundary
+            dirty = False
+            for bulb in self.config["bulbs"]:
+                mac = bulb["mac"]
+                current = self.pilot(bulb)
+                known = mac in self.previous
+                previous = self.previous.get(mac)
+                self.previous[mac] = current
+                if current is None or not current["state"]:
+                    continue
+                # External colour/brightness changes while on are manual too.
+                # Do not infer such a change from a lost packet or power cycle.
+                if previous and previous["state"] and signature(current) != signature(previous):
+                    self.holds[mac] = following
+                    dirty = True
+                held = self.holds.get(mac, 0) > now
+                turned_on = known and (previous is None or not previous["state"])
+                if not held and (crossed or turned_on):
+                    if self.apply(bulb, mode):
+                        # Global bulb fades can take seconds; baseline the next
+                        # poll rather than mistake an intermediate fade for an
+                        # external manual override.
+                        self.previous.pop(mac, None)
+            self.last_boundary = boundary
+            if dirty:
+                self.save()
+
+    def command(self, room, mode, now):
+        if not isinstance(room, str) or mode not in (*MODES, "OFF", "AUTO", "ON", "TOGGLE"):
+            raise ValueError("Expected room and REGULAR, NIGHT, OFF, ON, AUTO or TOGGLE mode")
+        with self.lock:
+            if not self.config["enabled"]:
+                raise ValueError("Butler timetable is disabled; save settings in the remote")
+            bulbs = [b for b in self.config["bulbs"] if b["room"] == room]
+            if not bulbs:
+                raise ValueError("Room is not configured on the butler")
+            # Decide toggle from the laptop's fresh observations under the same
+            # lock as scheduling, not the phone's potentially stale UDP cache.
+            pilots = {bulb["mac"]: self.pilot(bulb) for bulb in bulbs}
+            if mode == "TOGGLE":
+                mode = "OFF" if any(p and p["state"] for p in pilots.values()) else "ON"
+            current_mode, _, following = schedule(self.config, now)
+            for bulb in bulbs:
+                if mode in ("AUTO", "ON"):
+                    self.holds.pop(bulb["mac"], None)
+                else:
+                    self.holds[bulb["mac"]] = following
+            # Persist intent before writing, so restart or a lost UDP reply
+            # cannot cause the scheduler to undo a manual action.
+            self.save()
+            ok = 0
+            for bulb in bulbs:
+                pilot = pilots[bulb["mac"]]
+                if pilot is None:
+                    continue
+                if mode == "AUTO":
+                    success = not pilot["state"] or self.apply(bulb, current_mode)
+                else:
+                    preset = current_mode if mode == "ON" else mode
+                    params = {"state": mode != "OFF"} | (MODES[preset] if preset in MODES else {})
+                    success = self.write(bulb, "setPilot", params)
+                if success:
+                    ok += 1
+                self.previous.pop(bulb["mac"], None)
+            return {"answered": ok, "total": len(bulbs)}
+
+    def status(self):
+        with self.lock:
+            return {"config": self.config, "holds": dict(self.holds), "errors": dict(self.errors),
+                    "lastPoll": self.last_poll, "native": False}
+
+
+def handler(butler, token):
+    class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(10)
+
+        def respond(self, code, value):
+            data = json.dumps(value).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def authorized(self):
+            if not hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {token}".encode()):
+                self.respond(401, {"error": "Unauthorized"})
+                return False
+            return True
+
+        def do_GET(self):
+            if not self.authorized():
+                return
+            if self.path != "/v1/config":
+                self.respond(404, {"error": "Not found"})
+                return
+            self.respond(200, butler.status())
+
+        def do_POST(self):
+            if not self.authorized():
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 32768:
+                    raise ValueError("Invalid body length")
+                value = json.loads(self.rfile.read(length))
+                if not isinstance(value, dict):
+                    raise ValueError("Expected JSON object")
+                if self.path == "/v1/config":
+                    butler.configure(value)
+                    self.respond(200, butler.status())
+                elif self.path == "/v1/room":
+                    self.respond(200, butler.command(value.get("room"), value.get("mode"), time.time()))
+                else:
+                    self.respond(404, {"error": "Not found"})
+            except (ValueError, TypeError) as error:
+                self.respond(400, {"error": str(error)})
+            except OSError:
+                logging.exception("Butler storage/network failure")
+                self.respond(503, {"error": "Butler storage/network failure"})
+
+        def log_message(self, fmt, *args):
+            logging.info(fmt, *args)
+
+    return Handler
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--listen", default="127.0.0.1", help="Bind a specific LAN IP to allow the phone")
+    parser.add_argument("--port", type=int, default=8788)
+    parser.add_argument("--state", type=Path, default=Path.home() / ".local/state/uniremote-wiz/state.json")
+    parser.add_argument("--broadcast", default="255.255.255.255", help="LAN broadcast for DHCP rediscovery")
+    args = parser.parse_args()
+    token = os.environ.get("UNIREMOTE_TOKEN", "")
+    if len(token) < 32 or not token.isascii():
+        parser.error("Set UNIREMOTE_TOKEN to an ASCII secret of at least 32 characters")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    butler = Butler(args.state, Udp(args.broadcast))
+    server = ThreadingHTTPServer((args.listen, args.port), handler(butler, token))
+    stop = threading.Event()
+
+    def poll():
+        while not stop.is_set():
+            butler.changed.clear()
+            started = time.monotonic()
+            try:
+                butler.tick(time.time())
+            except Exception:
+                logging.exception("Poll failed; no automatic retry of writes")
+            butler.changed.wait(butler.poll_delay(time.time(), time.monotonic() - started))
+
+    worker = threading.Thread(target=poll, daemon=True)
+    worker.start()
+    logging.info("Listening on %s:%d; timetable enabled=%s", args.listen, args.port, butler.config["enabled"])
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        butler.changed.set()
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

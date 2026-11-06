@@ -1,0 +1,18 @@
+[Unit]
+Description=UniRemote optional WiZ timetable fallback
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/uniremote-wiz.env
+# Edit the repository path, laptop IP, and LAN broadcast before installing.
+ExecStart=/usr/bin/python3 %h/repos/Remote-control/butler/wiz_butler.py --listen 192.168.1.10 --broadcast 192.168.1.255
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

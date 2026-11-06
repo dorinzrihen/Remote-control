@@ -26,6 +26,8 @@ enum class LightMode(val label: String, val dimming: Int, val temp: Int) {
 /** What a bulb answers to getPilot. temp is null when the bulb shows a colour or a WiZ scene. */
 data class Pilot(val mac: String, val on: Boolean, val dimming: Int?, val temp: Int?)
 
+data class SystemConfig(val mac: String, val moduleName: String, val fwVersion: String)
+
 private const val TAG = "Wiz"
 
 /** WiZ bulbs take JSON commands over UDP port 38899 on the local network: no cloud and no pairing. */
@@ -33,14 +35,20 @@ object Wiz {
     const val PORT = 38899
 
     fun getPilotJson(): String = JSONObject().put("method", "getPilot").put("params", JSONObject()).toString()
+    fun getSystemConfigJson(): String = JSONObject().put("method", "getSystemConfig").put("params", JSONObject()).toString()
     fun setModeJson(mode: LightMode): String = setPilot(JSONObject().put("state", true).put("dimming", mode.dimming).put("temp", mode.temp))
-    /** The state alone keeps the bulb's last colour and brightness. */
+    /** Plain On can rejoin an already-configured native Rhythm; it does not upload a timetable. */
     fun setStateJson(on: Boolean): String = setPilot(JSONObject().put("state", on))
     private fun setPilot(params: JSONObject) = JSONObject().put("method", "setPilot").put("params", params).toString()
 
     fun parsePilot(text: String): Pilot? = runCatching {
         val r = JSONObject(text).getJSONObject("result")
         Pilot(r.getString("mac"), r.getBoolean("state"), r.optInt("dimming", -1).takeIf { it >= 0 }, r.optInt("temp", -1).takeIf { it > 0 })
+    }.getOrNull()
+
+    fun parseSystemConfig(text: String): SystemConfig? = runCatching {
+        val r = JSONObject(text).getJSONObject("result")
+        SystemConfig(r.getString("mac"), r.getString("moduleName"), r.getString("fwVersion"))
     }.getOrNull()
 
     /** Sends one command and returns the bulb's reply, or null. UDP can drop a packet, so it tries more than once. */
@@ -50,6 +58,7 @@ object Wiz {
                 s.soTimeout = timeoutMs
                 val data = json.toByteArray()
                 val addr = InetAddress.getByName(ip)
+                s.connect(addr, PORT) // Do not accept an unrelated host's reply.
                 val buf = ByteArray(1024)
                 repeat(tries) {
                     s.send(DatagramPacket(data, data.size, addr, PORT))
@@ -62,6 +71,7 @@ object Wiz {
     }
 
     suspend fun getPilot(ip: String): Pilot? = request(ip, getPilotJson())?.let(::parsePilot)
+    suspend fun getSystemConfig(ip: String): SystemConfig? = request(ip, getSystemConfigJson())?.let(::parseSystemConfig)
 
     /** Every WiZ device on the Wi-Fi answers a broadcast getPilot. Returns ip -> state. */
     suspend fun discover(timeoutMs: Long = 2500): Map<String, Pilot> = withContext(Dispatchers.IO) {
