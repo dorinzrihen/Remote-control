@@ -128,6 +128,39 @@ class TimetableEditorTest {
         assertEquals(initial, Timetable.from(initial.json().apply { remove("pollSeconds") }))
     }
 
+    @Test fun serverRaceAfterFreshReadKeepsDraftAndReapplyOnlyOverridesEditedFields() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody(status(initial).toString()))
+        server.enqueue(MockResponse().setResponseCode(409).setBody("""{"error":"Timetable changed on another device. Reload before saving."}"""))
+        server.enqueue(MockResponse().setBody(status(external).toString()))
+        server.start()
+        try {
+            val draft = initial.copy(morning = "08:00")
+            var editor = TimetableEditor(initial, draft)
+            val url = server.url("/").toString()
+            try {
+                saveTimetable(editor, { path, body -> ButlerClient.exchange(url, path, body) }, {
+                    editor = editor.observe(Timetable.from(it.getJSONObject("config")))
+                })
+                fail("Expected atomic conflict after fresh read")
+            } catch (_: TimetableConflict) {
+                editor = editor.copy(rejected = true)
+                editor = editor.observe(Timetable.from(ButlerClient.exchange(url, "/v1/status").getJSONObject("config")))
+            }
+            assertEquals(draft, editor.draft)
+            assertTrue(editor.conflict)
+            assertEquals(external, editor.latest)
+            assertEquals(external.copy(morning = "08:00"), editor.reapply().draft)
+            val requests = (0 until 3).map { server.takeRequest() }
+            assertEquals(listOf("GET", "POST", "GET"), requests.map { it.method })
+            assertEquals(listOf("/v1/status", "/v1/config", "/v1/status"), requests.map { it.path })
+            val payload = JSONObject(requests[1].body.readUtf8())
+            assertEquals(initial, Timetable.from(payload.getJSONObject("expectedConfig")))
+            assertEquals(5, payload.getJSONObject("expectedConfig").length())
+            assertFalse(payload.has("bulbs"))
+        } finally { server.shutdown() }
+    }
+
     @Test fun atomicServerConflictIsRecognizedAndDoesNotRetryPost() = runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(409).setBody("""{"error":"Timetable changed on another device. Reload before saving."}"""))
