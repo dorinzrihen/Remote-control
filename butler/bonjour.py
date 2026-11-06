@@ -12,8 +12,8 @@ SERVICE_TYPE = "_uniremote._tcp"
 
 
 def txt_record(address):
-    # Metadata only. Credentials and pairing codes must never be advertised.
-    entries = [b"api=1", b"pairing=code"]
+    # Access to the configured home LAN is trusted; no credential exchange.
+    entries = [b"api=1", b"auth=none"]
     ip = ipaddress.ip_address(address)
     if not ip.is_unspecified and not ip.is_loopback:
         entries.append(f"address={ip}".encode("ascii"))

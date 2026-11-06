@@ -138,7 +138,7 @@ session are preserved in the repository's **git-ignored private**
 ## Implementation and validation scope
 
 - The [lighting manager](../butler/README.md) is now the sole bulb owner. Android
-  uses authenticated HTTP for discovery, Blink, add/remove, status and room
+  uses credential-free home-LAN HTTP for discovery, Blink, add/remove, status and room
   commands; it has no direct WiZ transport or evening alarm. The legacy receiver
   only cancels leftover alarms on upgrade/startup.
 - The timetable toggle controls automatic scheduling only. Status/manual controls
@@ -151,7 +151,7 @@ session are preserved in the repository's **git-ignored private**
   treats stale/error/mismatched observations as unknown, not off. See the
   [HTTP contract](../butler/README.md#http-contract) for endpoints and freshness rules.
 - Automated fake-bulb/loopback HTTP and Android JVM tests cover scheduling,
-  authentication, persistence, DST, holds, identity/freshness checks, explicit
+  credential-free HTTP, persistence, DST, holds, bulb identity/freshness checks, explicit
   inventory operations and manager-only behavior. These are not physical-bulb
   or installed-phone acceptance tests.
 - Supervised live testing found a critical difference from the public research:
@@ -180,8 +180,12 @@ session are preserved in the repository's **git-ignored private**
 - The Mac manager deployment uses the two known bulbs, an enabled **21:00–06:00**
   timetable in **Asia/Jerusalem**, and **1-second** polling. Updating the same
   state file preserves prior configuration and holds. Its LaunchAgent remains
-  login-only; boot/lid/sleep changes are outside this work. Manager URL/token
-  entry remains manual: mDNS/Bonjour auto-discovery was explicitly deferred.
+  login-only; boot/lid/sleep changes are outside this work. The updated Android
+  Preview app discovers the Mac with Bonjour and connects to a sole manager with
+  zero entered fields. Several managers allow selection; a manual URL is an optional
+  fallback. No lighting token, pairing code or identity challenge is used. Access
+  to the configured home LAN is intentionally trusted; OpenCode/Tailscale access
+  is unchanged. Android v1.7 on the physical phone lacks this new flow.
 
 ## Sources
 

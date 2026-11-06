@@ -28,15 +28,12 @@ class ButlerTest {
 
     @Test fun rejectsCredentialsInUrl() {
         try {
-            ButlerClient.validateConnection("http://user:password@192.168.1.2:8788", "x".repeat(32))
+            ButlerClient.validateConnection("http://user:password@192.168.1.2:8788")
             throw AssertionError("Must reject URL credentials")
         } catch (_: IllegalArgumentException) { }
     }
 
-    @Test fun rejectsShortToken() {
-        try {
-            ButlerClient.validateConnection("http://192.168.1.2:8788", "short")
-            throw AssertionError("Must reject short token")
-        } catch (_: IllegalArgumentException) { }
+    @Test fun connectionNeedsOnlyBaseUrl() {
+        ButlerClient.validateConnection("http://192.168.1.2:8788")
     }
 }

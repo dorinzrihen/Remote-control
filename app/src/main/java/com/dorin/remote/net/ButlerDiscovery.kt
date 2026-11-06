@@ -74,6 +74,13 @@ class ButlerDiscovery(context: Context) {
     companion object {
         const val SERVICE_TYPE = "_uniremote._tcp."
 
+        fun automaticManager(found: List<FoundButler>): FoundButler? = found.singleOrNull()
+
+        /** Schedule ownership only: service names are LAN metadata, not an identity proof. */
+        fun canUseManager(savedUrl: String, savedName: String, url: String, name: String, timetableActive: Boolean): Boolean =
+            !timetableActive || savedUrl.isBlank() || savedUrl == url.trim().trimEnd('/') ||
+                (savedName.isNotBlank() && savedName == name)
+
         /** A TXT address handles IPv6-first resolution when the API binds IPv4. */
         fun managerUrl(host: String?, port: Int, attributes: Map<String, String>): String? {
             if (attributes["api"] != "1" || port !in 1..65535) return null

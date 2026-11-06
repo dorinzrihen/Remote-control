@@ -9,7 +9,7 @@ data class Bulb(val mac: String, val ip: String, val room: String)
 
 /** HTTP-only lighting client. There is deliberately no bulb network transport on Android. */
 class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) {
-    constructor(prefs: Prefs) : this({ path, body -> ButlerClient.exchange(prefs.butlerUrl, prefs.butlerToken, path, body) })
+    constructor(prefs: Prefs) : this({ path, body -> ButlerClient.exchange(prefs.butlerUrl, path, body) })
 
     val bulbs = MutableStateFlow<List<Bulb>>(emptyList())
     val pilots = MutableStateFlow<Map<String, Pilot>>(emptyMap())
@@ -19,7 +19,7 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
     val error = MutableStateFlow<String?>(null)
     val loaded = MutableStateFlow(false)
 
-    /** Only authenticated manager responses may replace these views. No prefs.bulbs bootstrap. */
+    /** Only selected manager responses replace these views. No prefs.bulbs bootstrap. */
     fun acceptStatus(status: JSONObject) {
         val settings = status.getJSONObject("config")
         val list = settings.getJSONArray("bulbs")

@@ -480,29 +480,29 @@ class ButlerTest(unittest.TestCase):
             self.butler.blink(MAC)
         self.assertEqual(1, len(self.udp.writes))
 
-    def test_all_http_endpoints_require_auth_and_status_get_is_cached(self):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.butler, "x" * 32))
+    def test_all_http_endpoints_trust_lan_and_status_get_is_cached(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.butler))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
 
-        def request(method, path, value=None, authorized=True):
+        def request(method, path, value=None):
             connection = http.client.HTTPConnection(*server.server_address, timeout=3)
-            headers = {"Authorization": "Bearer " + "x" * 32} if authorized else {}
-            connection.request(method, path, json.dumps(value) if value is not None else None, headers)
+            connection.request(method, path, json.dumps(value) if value is not None else None)
             response = connection.getresponse()
             result = response.status, json.loads(response.read())
             connection.close()
             return result
 
         for path in ("/v1/status", "/v1/config"):
-            self.assertEqual(401, request("GET", path, authorized=False)[0])
-        for path in ("/v1/config", "/v1/room", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/blink"):
-            with self.subTest(path=path):
-                self.assertEqual(401, request("POST", path, {}, authorized=False)[0])
+            self.assertEqual(200, request("GET", path)[0])
+        for path in ("/v1/pair", "/v1/identity"):
+            self.assertEqual(404, request("POST", path, {})[0])
         with patch.object(self.udp, "request", side_effect=AssertionError("GET is a cached manager snapshot")):
             self.assertEqual([BULB], request("GET", "/v1/status")[1]["config"]["bulbs"])
         self.assertEqual(400, request("POST", "/v1/config", self.config | {"bulbs": []})[0])
+        self.assertEqual(200, request("POST", "/v1/config", self.config)[0])
+        self.assertEqual(200, request("POST", "/v1/room", {"room": "Bedroom", "mode": "NIGHT"})[0])
         self.udp.found = {MAC: BULB["ip"]}
         self.assertEqual(MAC, request("POST", "/v1/discover", {})[1]["discovered"][0]["mac"])
         self.assertEqual(200, request("POST", "/v1/bulbs/add", BULB | {"room": "Kitchen"})[0])
@@ -512,8 +512,8 @@ class ButlerTest(unittest.TestCase):
         self.assertEqual(200, request("POST", "/v1/bulbs/remove", {"mac": MAC})[0])
         self.assertEqual(400, request("POST", "/v1/bulbs/remove", {"mac": MAC})[0])
 
-    def test_http_auth_and_configuration(self):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.butler, "x" * 32))
+    def test_http_configuration_ignores_legacy_authorization(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.butler))
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         self.addCleanup(server.server_close)
@@ -527,7 +527,7 @@ class ButlerTest(unittest.TestCase):
             connection.close()
             return result
 
-        self.assertEqual(401, request("GET", "/v1/config", token="wrong")[0])
+        self.assertEqual(200, request("GET", "/v1/config", token="wrong")[0])
         self.assertEqual(404, request("GET", "/missing")[0])
         self.assertEqual(200, request("GET", "/v1/config")[0])
         response = request("POST", "/v1/config", self.config | {"night": "23:15", "morning": "08:30", "pollSeconds": 12})

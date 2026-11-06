@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -570,14 +571,19 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- WiZ bulbs ----------
 
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
     suspend fun discoverButlers() {
         foundButlers.value = emptyList()
         selectedButlerUrl.value = ""
         butlerDiscoveryStatus.value = "Searching on Wi-Fi…"
         try {
-            butlerDiscovery.discover().collect { found ->
+            butlerDiscovery.discover().debounce(750).collect { found ->
                 foundButlers.value = found
-                butlerDiscoveryStatus.value = if (found.isEmpty()) "Searching on Wi-Fi…" else "Butler found"
+                butlerDiscoveryStatus.value = when (found.size) {
+                    0 -> "Searching on Wi-Fi…"
+                    1 -> "Manager found"
+                    else -> "Choose a manager"
+                }
                 if (found.none { it.url == selectedButlerUrl.value }) selectedButlerUrl.value = found.singleOrNull()?.url.orEmpty()
                 reconnectDiscoveredButler()
             }
@@ -587,39 +593,22 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun reconnectDiscoveredButler() {
-        if (lights.loaded.value || prefs.butlerToken.isBlank() || butlerBusy.value || foundButlers.value.isEmpty()) return
+        // Match a previously loaded URL to its service name for future DHCP changes.
+        foundButlers.value.firstOrNull { it.url == prefs.butlerUrl }?.let { prefs.butlerServiceName = it.name }
+        if (lights.loaded.value || butlerBusy.value) return
+        val manager = ButlerDiscovery.automaticManager(foundButlers.value) ?: return
+        if (!canUseManager(manager.url, manager.name)) return
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastButlerReconnect < 10_000) return
         lastButlerReconnect = now
         butlerBusy.value = true
         try {
-            for (manager in foundButlers.value) {
-                // Discovery is not authentication. Prove the manager holds the
-                // saved secret before sending that secret to a changed address.
-                try {
-                    if (!ButlerClient.verifyManager(manager.url, prefs.butlerToken)) continue
-                    val result = ButlerClient.exchange(manager.url, prefs.butlerToken, "/v1/status")
-                    adoptManager(manager.url, prefs.butlerToken, result)
-                    butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
-                    break
-                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                catch (_: Exception) { /* Try the next advertised manager. */ }
-            }
-        } finally { butlerBusy.value = false }
-    }
-
-    fun pairButler(url: String, code: String) {
-        if (butlerBusy.value || !canUseManager(url)) return
-        viewModelScope.launch {
-            butlerBusy.value = true
-            try {
-                val token = ButlerClient.pair(url, code)
-                val result = ButlerClient.exchange(url, token, "/v1/status")
-                adoptManager(url, token, result)
-                butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
-            } catch (e: Exception) { butlerStatus.value = e.message ?: "Pairing failed" }
-            finally { butlerBusy.value = false }
-        }
+            val result = ButlerClient.exchange(manager.url, "/v1/status")
+            adoptManager(manager.url, result, manager.name)
+            butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (e: Exception) { butlerStatus.value = "Could not connect: ${e.message}" }
+        finally { butlerBusy.value = false }
     }
 
     suspend fun pollBulbs() {
@@ -634,17 +623,20 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) { butlerStatus.value = "Manager unavailable: ${e.message}" }
     }
 
-    private fun canUseManager(url: String): Boolean {
-        if ((prefs.butlerEnabled || prefs.butlerPending) && url.trim().trimEnd('/') != prefs.butlerUrl) {
+    private fun canUseManager(url: String, name: String = foundButlers.value.firstOrNull { it.url == url.trim().trimEnd('/') }?.name.orEmpty()): Boolean {
+        if (!ButlerDiscovery.canUseManager(prefs.butlerUrl, prefs.butlerServiceName, url, name, prefs.butlerEnabled || prefs.butlerPending)) {
             butlerStatus.value = "Disable and Save the existing manager timetable before changing managers."
             return false
         }
         return true
     }
 
-    private fun adoptManager(url: String, token: String, result: org.json.JSONObject) {
+    private fun adoptManager(url: String, result: org.json.JSONObject, name: String = foundButlers.value.firstOrNull { it.url == url.trim().trimEnd('/') }?.name.orEmpty()) {
         lights.acceptStatus(result)
-        prefs.butlerUrl = url.trim().trimEnd('/'); prefs.butlerToken = token
+        val normalized = url.trim().trimEnd('/')
+        if (normalized != prefs.butlerUrl || name.isNotBlank()) prefs.butlerServiceName = name
+        prefs.butlerUrl = normalized
+        selectedButlerUrl.value = normalized
         prefs.butlerEnabled = result.getJSONObject("config").getBoolean("enabled")
         prefs.butlerPending = false
         butlerEnabled.value = prefs.butlerEnabled
@@ -652,13 +644,13 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         prefs.butlerConfig = butlerSettings.value.toString()
     }
 
-    fun loadButler(url: String, token: String) {
+    fun loadButler(url: String) {
         if (butlerBusy.value || !canUseManager(url)) return
         viewModelScope.launch {
             butlerBusy.value = true
             try {
-                val result = ButlerClient.exchange(url, token, "/v1/status")
-                adoptManager(url, token, result)
+                val result = ButlerClient.exchange(url, "/v1/status")
+                adoptManager(url, result)
                 newBulbs.value = emptyMap()
                 butlerStatus.value = "Connected · ${lights.bulbs.value.size} bulbs"
             } catch (e: Exception) {
@@ -669,13 +661,13 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun saveButler(url: String, token: String, enabled: Boolean, night: String, morning: String, timezone: String, pollSeconds: String) {
+    fun saveButler(url: String, enabled: Boolean, night: String, morning: String, timezone: String, pollSeconds: String) {
         if (butlerBusy.value || !canUseManager(url)) return
-        if (butlerSettings.value == null || url.trim().trimEnd('/') != prefs.butlerUrl || token != prefs.butlerToken) {
+        if (butlerSettings.value == null || url.trim().trimEnd('/') != prefs.butlerUrl) {
             butlerStatus.value = "Load this manager first, then edit and Save its timetable."
             return
         }
-        try { ButlerClient.validateConnection(url, token) }
+        try { ButlerClient.validateConnection(url) }
         catch (e: Exception) { butlerStatus.value = e.message ?: "Invalid connection"; return }
         val timePattern = Regex("(?:[01][0-9]|2[0-3]):[0-5][0-9]")
         if (!timePattern.matches(night) || !timePattern.matches(morning) || night == morning) {
@@ -692,15 +684,15 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             butlerBusy.value = true
             try {
-                // Read first for bootstrap/authentication, then save ONLY the
+                // Read current settings first, then save ONLY the
                 // timetable. Even an empty/reinstalled phone cannot erase bulbs.
-                val current = ButlerClient.exchange(url, token, "/v1/status")
-                adoptManager(url, token, current)
+                val current = ButlerClient.exchange(url, "/v1/status")
+                adoptManager(url, current)
                 val config = ButlerClient.config(enabled, night, morning, timezone, interval)
-                prefs.butlerUrl = url.trim().trimEnd('/'); prefs.butlerToken = token
+                prefs.butlerUrl = url.trim().trimEnd('/')
                 prefs.butlerPending = true
-                val result = ButlerClient.exchange(url, token, "/v1/config", config)
-                adoptManager(url, token, result)
+                val result = ButlerClient.exchange(url, "/v1/config", config)
+                adoptManager(url, result)
                 butlerStatus.value = if (enabled) "Timetable saved" else "Timetable off"
             } catch (e: Exception) { butlerStatus.value = "Save unconfirmed: ${e.message}. Load manager status before retrying." }
             finally { butlerBusy.value = false }

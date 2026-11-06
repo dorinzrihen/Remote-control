@@ -68,9 +68,10 @@ class Prefs(ctx: Context) {
     var butlerUrl: String
         get() = sp.getString("butler_url", "") ?: ""
         set(v) = sp.edit().putString("butler_url", v).apply()
-    var butlerToken: String
-        get() = sp.getString("butler_token", "") ?: ""
-        set(v) = sp.edit().putString("butler_token", v).apply()
+    /** Bonjour service name tracks address changes, not authentication. Old tokens are ignored. */
+    var butlerServiceName: String
+        get() = sp.getString("butler_service_name", "") ?: ""
+        set(v) = sp.edit().putString("butler_service_name", v).apply()
     var butlerPending: Boolean
         get() = sp.getBoolean("butler_pending", false)
         set(v) = sp.edit().putBoolean("butler_pending", v).apply()

@@ -148,26 +148,25 @@ class ManagerLightsTest {
         catch (e: IllegalStateException) { assertTrue(e.message!!.contains("MAC mismatch")) }
     }
 
-    @Test fun httpRequestsAuthenticateEveryEndpointAndExposeServerErrors() = runBlocking {
-        val token = "x".repeat(32)
+    @Test fun httpRequestsNeedNoCredentialsForAnyEndpointAndExposeServerErrors() = runBlocking {
         val server = MockWebServer()
         repeat(6) { server.enqueue(MockResponse().setBody("{}")) }
         server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":"MAC mismatch"}"""))
         server.start()
         try {
             val url = server.url("/").toString()
-            ButlerClient.exchange(url, token, "/v1/status")
+            ButlerClient.exchange(url, "/v1/status")
             for (path in listOf("/v1/config", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/blink")) {
-                ButlerClient.exchange(url, token, path, JSONObject())
+                ButlerClient.exchange(url, path, JSONObject())
             }
-            try { ButlerClient.exchange(url, token, "/v1/room", JSONObject()); fail("Expected server error") }
+            try { ButlerClient.exchange(url, "/v1/room", JSONObject()); fail("Expected server error") }
             catch (e: IllegalStateException) { assertEquals("MAC mismatch", e.message) }
             assertEquals(7, server.requestCount)
             val requests = (0 until 7).map { server.takeRequest() }
             assertEquals("GET", requests.first().method)
             assertEquals("/v1/status", requests.first().path)
             assertTrue(requests.drop(1).all { it.method == "POST" })
-            requests.forEach { assertEquals("Bearer $token", it.getHeader("Authorization")) }
+            requests.forEach { assertNull(it.getHeader("Authorization")) }
         } finally { server.shutdown() }
     }
 

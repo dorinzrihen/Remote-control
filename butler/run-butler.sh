@@ -1,5 +1,5 @@
 #!/bin/sh
-# Portable foreground/launchd launcher. Secrets stay in a private environment file.
+# Portable foreground/launchd launcher. Runtime paths and LAN bind are configured here.
 set -eu
 env_file=${UNIREMOTE_ENV_FILE:-"$HOME/.config/uniremote-wiz.env"}
 if [ ! -f "$env_file" ]; then
