@@ -8,9 +8,9 @@ import tempfile
 
 
 CAPTURES = {
-    "regular": ("Regular · 100% cool white", "Read-only sample"),
-    "night": ("Night · 20% warm white", "Read-only sample"),
-    "follow": ("Follow timetable", "Read-only sample"),
+    "regular": ("Regular selected", "Read-only sample"),
+    "night": ("Night selected", "Read-only sample"),
+    "follow": ("Follow timetable selected", "Read-only sample"),
     "manage": ("Manage bulbs", "Read-only sample"),
     "connected": ("Connected automatically", "Live Mac"),
     "timetable": ("Edit timetable", "Live Mac"),
@@ -32,8 +32,7 @@ def write_gallery(output: Path) -> None:
         title, source = CAPTURES[key]
         name = f"bulbs-{key}.png"
         path = output / name
-        note = '<span class="limitation">LIMITATION · no Follow marker</span>' if key == "follow" else ""
-        caption = f'<figcaption><strong>{escape(title)}</strong>{note}<small>{source}</small></figcaption>'
+        caption = f'<figcaption><strong>{escape(title)}</strong><small>{source}</small></figcaption>'
         if not path.is_file():
             content = f'<div class="missing">Awaiting actual capture: {name}</div>'
         else:
@@ -49,7 +48,6 @@ def write_gallery(output: Path) -> None:
 <header><h1>Bulbs — screenshots</h1></header>
 <main>
 <section class="screens three" id="modes" aria-label="Regular, Night, and Follow screenshots">{modes}</section>
-<p class="tiny">Follow currently looks like Night: the highlight shows observed bulb output, not whether Follow was selected.</p>
 <section class="management" aria-label="Manage bulbs screenshot">
 {screenshot("manage")}
 <aside><h2>Manage bulbs</h2><p><b>Blink</b> → identify a bulb</p><p><b>Hold Remove</b> → remove a saved bulb</p><p><b>Find new bulbs</b> → Room → Add</p><p class="tiny">Firmware and last-observed age, when available. No existing-room rename control.</p></aside>

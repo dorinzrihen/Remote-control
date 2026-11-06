@@ -63,7 +63,7 @@ class PreviewGalleryTest(unittest.TestCase):
 
     def test_truthful_notes_below_screenshots(self):
         page = self.page()
-        for phrase in ("LIMITATION · no Follow marker", "observed bulb output", "No existing-room rename",
+        for phrase in ("Regular selected", "Night selected", "Follow timetable selected", "No existing-room rename",
                        "Working now:", "anyone on Wi-Fi", "Fresh emulator connected without entering any fields",
                        "Assistant-added choice, not requested", "v1.7: “Butler token”"):
             self.assertIn(phrase, page)
@@ -71,6 +71,8 @@ class PreviewGalleryTest(unittest.TestCase):
         self.assertNotIn("being removed", page)
         self.assertNotIn("in progress", page)
         self.assertEqual("Live Mac", CAPTURES["advanced"][1])
+        for obsolete in ("no Follow marker", "looks like Night", "LIMITATION", "observed bulb output"):
+            self.assertNotIn(obsolete, page)
 
     def test_no_broken_apk_link(self):
         self.assertNotIn('href="UniRemote-Preview.apk"', self.page())
