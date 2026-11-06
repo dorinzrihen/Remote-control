@@ -1,58 +1,57 @@
-# Credential-free lighting validation
+# Lighting validation
 
-The lighting API intentionally trusts access to the configured home LAN. No
-lighting password/token, six-digit code or identity challenge is used. This is
-unrelated to TV pairing or OpenCode/Tailscale authentication.
+The home LAN is trusted: no lighting authentication or credential entry.
+A sole discovered manager connects automatically; several managers allow selection.
+Advanced connection is an optional manual URL fallback.
 
-`Connected · 2 bulbs` means the manager API is reachable, not that both bulbs
-respond. A successful manager response with zero bulb acknowledgements is a
-bulb-level failure: the app reports the affected room and keeps manager status
-connected. Unconfirmed requests do not claim that the manager is down or that
-the command was never applied. Regression tests simulate these cases without
-sending real light commands.
+## What to check
 
-The small dot next to **Bulbs** is green only after a fresh successful manager
-status response. It is grey on opening/checking, after a failed request, or when
-the last success is over five seconds old. Individual bulb errors and timetable
-enabled/disabled state do not change it. Its accessibility label describes the
-connection state. The indicator's emulator UI test uses controlled HTTP-client
-responses, including failure, without touching a real manager or saved settings.
+- The Bulbs dot is green only after a successful manager status response within
+  five seconds; otherwise it is grey, including while checking. Individual bulb
+  failures and timetable enabled/disabled state do not set its color.
+- `Connected · 2 bulbs` describes manager access and saved inventory, not two
+  responsive bulbs. Zero bulb acknowledgements must report a bulb-level failure,
+  not a manager outage; uncertain requests must not be described as never applied.
+- Regular, Night and Follow timetable are mutually exclusive, derived from
+  persisted manager state and fresh observations, not tap memory. Following may
+  show the current physical preset in room status without selecting a second
+  button. Mixed/unknown state must not claim a known preset.
 
-Run fake-bulb/HTTP tests (no hardware writes):
+The fake-bulb/HTTP and Android checks are listed in [testing.md](testing.md).
+Relevant sources are `butler/test_*.py`, `app/src/test/`, and the controlled-response
+indicator UI test in `app/src/androidTest/java/com/dorin/remote/ManagerConnectionIndicatorTest.kt`.
+Unit tests do not run that instrumented UI test or prove physical scheduling.
+
+## Screenshot fixtures: no household connection
+
+With a built Preview APK and a **disposable, booted emulator**:
 
 ```sh
-python3 -m unittest discover -s butler -v
-JAVA_HOME=$PWD/.local/build-tools/java/jdk-17.0.21+9 ANDROID_HOME=$PWD/.local/build-tools/android-sdk ./gradlew testDebugUnitTest testReleaseUnitTest assembleDebug assembleRelease
+python3 tools/android_preview.py --serial emulator-5554 --fixtures-only
 ```
 
-With the dedicated Android 15 emulator booted and the LAN manager running:
+Replace the serial with that emulator's actual serial. The script resets Preview
+data, seeds a loopback-only read-only sample manager before opening Bulbs, and
+blocks switching to household discovery. Regular/Night/Follow screenshots in
+`.local/preview/fixture/` are sample UI evidence, not real-manager or bulb tests.
+Do not target the everyday emulator if you want to preserve its settings.
+
+## Real LAN: read-only connection check
+
+With a built Preview APK, a disposable booted emulator and the manager available:
 
 ```sh
-python3 tools/android_lan_preview.py
+python3 tools/android_lan_preview.py --serial emulator-5554 --manager-url http://10.100.102.19:8788
 ```
 
-This installs the separate `com.dorin.uniremote.preview` debug app, clears its
-emulator-only data, opens Bulbs and verifies automatic discovery/connection with
-**zero entered fields**. The manager URL option is only a readback assertion;
-it is never entered into the app. The script reads `/v1/status` without credentials,
-asserts the saved discovered URL/service name and absence of a token, opens the
-read-only timetable/advanced views, and checks inventory, timetable and holds are
-unchanged. It never taps a light, Save, Blink or bulb-inventory action.
+This helper uses the checkout's `.local/build-tools/android-sdk/platform-tools/adb`.
+Use the actual emulator serial and current manager URL. The URL is a readback
+assertion, never entered into the app. It resets only Preview emulator data,
+checks zero-input discovery/connection, reads `/v1/status`, inspects saved discovery
+settings and read-only timetable/advanced views, and compares inventory, timetable
+and holds before/after. It never taps light controls or saves configuration.
+PNG/XML evidence and the unpublished APK are saved in `.local/preview/live/`.
 
-Actual UI screenshots and XML are saved in `.local/preview/live/`:
-`bulbs-setup`, `bulbs-connected`, `bulbs-timetable`, `bulbs-advanced`. Setup may
-already be connected because there is no onboarding step to wait for. The copied
-`UniRemote-Preview.apk` is unpublished, installs beside v1.7, and disables public
-update prompts. Compilation and emulator evidence are not physical-phone testing.
-
-Earlier screenshots showing a pairing code or token are obsolete. The older
-`tools/android_preview.py --live-butler-ssh` pairing workflow is obsolete; use
-`tools/android_lan_preview.py` for this flow. Its old authenticated sample fixture
-also needs adapting before reuse. Gallery assembly is independent of validation.
-Follow still has no distinct active-mode marker; this change does not add one.
-
-Only a genuinely different manager remains subject to the existing schedule
-ownership rule: disable and Save the old manager's timetable before switching.
-Fresh installs, an unchanged URL, and the same saved Bonjour service name at a
-changed address do not require approval. Service names are trusted LAN metadata,
-not an identity proof. Several discovered managers are shown for selection.
+This does not validate mode transitions or schedule execution. For everyday
+settings-preserving development use [emulator.md](emulator.md); for the required
+actual Pixel 8a home-Wi-Fi checks use [testing.md](testing.md).
