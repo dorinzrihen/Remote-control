@@ -1,6 +1,10 @@
 package com.dorin.remote
 
+import com.dorin.remote.wiz.Bulb
+import com.dorin.remote.wiz.BulbRenames
 import com.dorin.remote.wiz.ButlerClient
+import com.dorin.remote.wiz.bulbRenameFailure
+import com.dorin.remote.wiz.cachedManagerSettings
 import com.dorin.remote.wiz.LightMode
 import com.dorin.remote.wiz.Lights
 import com.dorin.remote.wiz.BulbsDidNotAnswer
@@ -128,6 +132,113 @@ class ManagerLightsTest {
         lights.blink(mac)
         lights.remove(mac)
         assertEquals(listOf("/v1/discover", "/v1/bulbs/add", "/v1/bulbs/blink", "/v1/bulbs/remove"), calls)
+    }
+
+    private fun statusNamed(room: String): JSONObject = status().apply {
+        getJSONObject("config").getJSONArray("bulbs").getJSONObject(0).put("room", room)
+    }
+
+    @Test fun renameSendsTrimmedNameOnceAndAdoptsManagerResponse() = runBlocking {
+        val calls = mutableListOf<String>()
+        val lights = Lights { path, body ->
+            calls += path
+            assertEquals(mac, body!!.getString("mac"))
+            assertEquals("Reading lamp", body.getString("room"))
+            assertEquals(setOf("mac", "room"), body.keySet())
+            statusNamed("Manager's spelling")
+        }
+        lights.acceptStatus(status())
+        lights.rename(mac, "  Reading lamp ")
+        assertEquals(listOf("/v1/bulbs/rename"), calls)
+        assertEquals("Manager's spelling", lights.bulbs.value.single().room) // manager's answer, not what was typed
+        assertEquals(setOf("Manager's spelling"), lights.roomControls.value.keys)
+    }
+
+    @Test fun emptyNamesAreRejectedBeforeSending() = runBlocking {
+        var calls = 0
+        val lights = Lights { _, _ -> calls++; status() }
+        for (name in listOf("", "   ", "\t\n")) {
+            try { lights.rename(mac, name); fail("Expected empty name rejection") }
+            catch (e: IllegalArgumentException) { assertEquals("Enter a bulb name", e.message) }
+        }
+        assertEquals(0, calls)
+    }
+
+    @Test fun olderManagerWithoutRenameShowsShortFailureAndChangesNothing() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"Not found"}"""))
+        server.start()
+        try {
+            val lights = Lights { path, body -> ButlerClient.exchange(server.url("/").toString(), path, body) }
+            lights.acceptStatus(status())
+            try { lights.rename(mac, "Kitchen"); fail("Expected 404") }
+            catch (e: com.dorin.remote.wiz.ButlerRequestRejected) {
+                assertEquals("Update the manager to rename bulbs", bulbRenameFailure(e))
+            }
+            assertEquals(1, server.requestCount)
+            assertEquals("Manager room", lights.bulbs.value.single().room)
+            assertTrue(lights.loaded.value)
+            assertEquals(ManagerConnection.CONNECTED, lights.managerConnection.current())
+        } finally { server.shutdown() }
+    }
+
+    @Test fun otherRenameFailuresKeepTheirExistingMeaning() {
+        assertEquals("Lighting request rejected: Invalid room",
+            bulbRenameFailure(com.dorin.remote.wiz.ButlerRequestRejected("Invalid room", 400)))
+        assertTrue(bulbRenameFailure(java.io.IOException("Read timed out")).contains("outcome unknown"))
+    }
+
+    @Test fun renameFromAnotherPhoneAppearsThroughNormalPolling() = runBlocking {
+        var name = "Manager room"
+        val lights = Lights { path, body ->
+            assertEquals("/v1/status", path)
+            assertNull(body)
+            statusNamed(name)
+        }
+        lights.refresh()
+        name = "Named elsewhere"
+        lights.refresh()
+        assertEquals("Named elsewhere", lights.bulbs.value.single().room)
+        assertEquals(setOf("Named elsewhere"), lights.roomControls.value.keys)
+    }
+
+    @Test fun pollingNeverReplacesTextBeingTyped() = runBlocking {
+        var name = "Manager room"
+        var failing = false
+        val lights = Lights { _, _ -> if (failing) throw java.io.IOException("offline") else statusNamed(name) }
+        lights.refresh()
+        var renames = BulbRenames().open(lights.bulbs.value.single()).type(mac, "Half-typed")
+        name = "Named elsewhere"
+        lights.refresh()
+        renames = renames.observe(lights.bulbs.value)
+        assertEquals("Half-typed", renames.drafts[mac])
+        failing = true
+        try { lights.refresh(); fail("Expected offline") } catch (_: java.io.IOException) { }
+        assertFalse(lights.loaded.value)
+        renames = renames.observe(lights.bulbs.value)
+        assertEquals("Half-typed", renames.drafts[mac])
+        assertEquals(renames, renames.open(lights.bulbs.value.single())) // reopening keeps typing as well
+    }
+
+    @Test fun renameFormFollowsItsBulbAndFreezesWhileSaving() {
+        val other = Bulb("112233445566", "192.168.1.21", "Other")
+        var renames = BulbRenames().open(Bulb(mac, "192.168.1.20", "Manager room")).open(other)
+        assertEquals("Manager room", renames.drafts[mac])
+        renames = renames.sending(mac).type(mac, "Ignored")
+        assertEquals("Manager room", renames.drafts[mac])
+        assertEquals("Kept", renames.failed(mac).type(mac, "Kept").drafts[mac])
+        assertFalse(mac in renames.close(mac).saving)
+        assertEquals(setOf(other.mac), renames.observe(listOf(other)).drafts.keys) // removed elsewhere
+    }
+
+    @Test fun phoneKeepsTimetableButNeverBulbNames() {
+        val config = status().getJSONObject("config")
+        val cached = JSONObject(cachedManagerSettings(config))
+        assertFalse(cached.has("bulbs"))
+        assertEquals("22:15", cached.getString("night"))
+        assertTrue(config.has("bulbs")) // the live view is not altered
+        assertFalse(File("src/main/java/com/dorin/remote/Prefs.kt").readText().contains("room", ignoreCase = true))
+        assertFalse(File("src/main/java/com/dorin/remote/RemoteViewModel.kt").readText().contains("prefs.bulbs"))
     }
 
     @Test fun failedManagerNeverFallsBackAndClearsStaleOnState() = runBlocking {
@@ -259,6 +370,37 @@ class ManagerLightsTest {
         } finally { server.shutdown() }
     }
 
+    @Test fun renameDisconnectIsNeverResent() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        server.enqueue(MockResponse().setBody(status().toString()))
+        server.start()
+        try {
+            val lights = Lights { path, body -> ButlerClient.exchange(server.url("/").toString(), path, body) }
+            try { lights.rename(mac, "Kitchen"); fail("Expected unknown outcome after disconnect") }
+            catch (e: java.io.IOException) { assertTrue(bulbRenameFailure(e).contains("outcome unknown")) }
+            assertEquals(1, server.requestCount)
+        } finally { server.shutdown() }
+    }
+
+    @Test fun postAfterPollIsNotSentOnTheConnectionTheManagerClosed() = runBlocking {
+        val server = MockWebServer()
+        // The manager speaks HTTP/1.0 and closes every connection after replying.
+        repeat(5) {
+            server.enqueue(MockResponse().setBody(status().toString()).setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AT_END))
+            server.enqueue(MockResponse().setBody(status().toString()).setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AT_END))
+        }
+        server.start()
+        try {
+            val url = server.url("/").toString()
+            repeat(5) {
+                ButlerClient.exchange(url, "/v1/status")
+                ButlerClient.exchange(url, "/v1/bulbs/rename", JSONObject().put("mac", mac).put("room", "Kitchen"))
+            }
+            assertEquals(10, server.requestCount)
+        } finally { server.shutdown() }
+    }
+
     @Test fun postTimeoutIsUnknownAndNeverRetried() = runBlocking {
         var calls = 0
         val lights = Lights { _, _ -> calls++; throw java.net.SocketTimeoutException("Read timed out") }
@@ -270,7 +412,7 @@ class ManagerLightsTest {
     }
 
     @Test fun everyMutationIsSentOnceDespite503RetryAfterZero() = runBlocking {
-        for (path in listOf("/v1/room", "/v1/config", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/blink")) {
+        for (path in listOf("/v1/room", "/v1/config", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/rename", "/v1/bulbs/blink")) {
             val server = MockWebServer()
             server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0").setBody("{}"))
             server.enqueue(MockResponse().setBody("""{"answered":1,"total":1}"""))
@@ -315,13 +457,13 @@ class ManagerLightsTest {
 
     @Test fun httpRequestsNeedNoCredentialsForAnyEndpointAndExposeServerErrors() = runBlocking {
         val server = MockWebServer()
-        repeat(6) { server.enqueue(MockResponse().setBody("{}")) }
+        repeat(7) { server.enqueue(MockResponse().setBody("{}")) }
         server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":"MAC mismatch"}"""))
         server.start()
         try {
             val url = server.url("/").toString()
             ButlerClient.exchange(url, "/v1/status")
-            for (path in listOf("/v1/config", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/blink")) {
+            for (path in listOf("/v1/config", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/rename", "/v1/bulbs/blink")) {
                 ButlerClient.exchange(url, path, JSONObject())
             }
             try { ButlerClient.exchange(url, "/v1/room", JSONObject()); fail("Expected server error") }
@@ -329,8 +471,8 @@ class ManagerLightsTest {
                 assertEquals("MAC mismatch", e.message)
                 assertEquals("Lighting request rejected: MAC mismatch", lightingCommandFailure(e))
             }
-            assertEquals(7, server.requestCount)
-            val requests = (0 until 7).map { server.takeRequest() }
+            assertEquals(8, server.requestCount)
+            val requests = (0 until 8).map { server.takeRequest() }
             assertEquals("GET", requests.first().method)
             assertEquals("/v1/status", requests.first().path)
             assertTrue(requests.drop(1).all { it.method == "POST" })

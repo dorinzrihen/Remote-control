@@ -174,10 +174,10 @@ class Butler:
                 expected = validate_config(expected | {"bulbs": []})
                 if any(expected[key] != self.config[key] for key in TIMETABLE_KEYS):
                     raise ConfigConflict("Timetable changed on another device. Reload before saving.")
-            # Bulbs have dedicated add/remove operations. In particular an old
+            # Bulbs have dedicated add/remove/rename operations. In particular an old
             # or newly installed phone must never erase this manager's list.
             if "bulbs" in value and value["bulbs"] != self.config["bulbs"]:
-                raise ValueError("Manager owns the bulb list; use bulb add/remove, not config")
+                raise ValueError("Manager owns the bulb list; use bulb add/remove/rename, not config")
             config = validate_config(value | {"bulbs": self.config["bulbs"]})
             # Preserve holds, observations and known addresses. Saving a
             # timetable is not a lighting action or a discovery reset.
@@ -249,6 +249,21 @@ class Butler:
                 raise
             for cache in (self.observed, self.observed_at, self.errors, self.system_configs):
                 cache.pop(mac, None)
+            return self.status()
+
+    def rename_bulb(self, mac, room):
+        with self.lock:
+            if not isinstance(mac, str) or not any(b["mac"] == mac for b in self.config["bulbs"]):
+                raise ValueError("Bulb is not configured on the manager")
+            old = self.config
+            # Holds and intents are keyed by MAC, so they follow the bulb. Do not
+            # set self.changed: waking the poll loop early would be bulb traffic.
+            self.config = validate_config(old | {"bulbs": [b | {"room": room} if b["mac"] == mac else b for b in old["bulbs"]]})
+            try:
+                self.save()
+            except OSError:
+                self.config = old
+                raise
             return self.status()
 
     def read_system_config(self, bulb):
@@ -532,6 +547,8 @@ def handler(butler):
                     self.respond(200, butler.add_bulb(value))
                 elif self.path == "/v1/bulbs/remove":
                     self.respond(200, butler.remove_bulb(value.get("mac")))
+                elif self.path == "/v1/bulbs/rename":
+                    self.respond(200, butler.rename_bulb(value.get("mac"), value.get("room")))
                 elif self.path == "/v1/bulbs/blink":
                     self.respond(200, butler.blink(value.get("mac")))
                 else:

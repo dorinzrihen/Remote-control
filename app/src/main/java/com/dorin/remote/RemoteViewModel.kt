@@ -23,6 +23,8 @@ import com.dorin.remote.wiz.TimetableEditor
 import com.dorin.remote.wiz.TimetableConflict
 import com.dorin.remote.wiz.saveTimetable
 import com.dorin.remote.wiz.Pilot
+import com.dorin.remote.wiz.bulbRenameFailure
+import com.dorin.remote.wiz.cachedManagerSettings
 import com.dorin.remote.wiz.lightingCommandFailure
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -668,7 +670,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
         prefs.butlerEnabled = config.getBoolean("enabled")
         butlerEnabled.value = prefs.butlerEnabled
         butlerSettings.value = config
-        prefs.butlerConfig = butlerSettings.value.toString()
+        prefs.butlerConfig = cachedManagerSettings(config)
         val timetable = Timetable.from(config)
         timetableEditor.value = timetableEditor.value?.observe(timetable) ?: TimetableEditor(timetable)
     }
@@ -790,6 +792,16 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
             catch (e: Exception) { say("Manager could not remove bulb: ${e.message}") }
         }
     }
+
+    /** One tap sends one POST. [done] reports whether the manager confirmed the new name. */
+    fun renameBulb(mac: String, room: String, done: (Boolean) -> Unit) {
+        if (room.isBlank()) { say("Enter a bulb name"); done(false); return }
+        viewModelScope.launch {
+            try { lights.rename(mac, room); done(true) }
+            catch (e: Exception) { say(bulbRenameFailure(e)); done(false) }
+        }
+    }
+
     fun blinkBulb(mac: String) {
         viewModelScope.launch {
             try { lights.blink(mac) }

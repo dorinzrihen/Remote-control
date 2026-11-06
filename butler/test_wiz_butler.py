@@ -803,6 +803,96 @@ class ButlerTest(unittest.TestCase):
                 self.butler.remove_bulb(MAC)
             self.assertEqual(before, self.butler.config)
 
+    def seed_second_bulb(self):
+        second = {"mac": "112233445566", "ip": "192.168.1.12", "room": "Bulb …a582"}
+        self.path.write_text(json.dumps({"config": self.config | {"bulbs": [BULB, second]}}))
+        self.butler = Butler(self.path, self.udp)
+        return second
+
+    def test_rename_persists_across_restart_and_keeps_bulb_order(self):
+        second = self.seed_second_bulb()
+        result = self.butler.rename_bulb(MAC, "Reading lamp")
+        expected = [BULB | {"room": "Reading lamp"}, second]
+        self.assertEqual(expected, result["config"]["bulbs"])
+        self.assertEqual(expected, Butler(self.path, self.udp).config["bulbs"])
+        self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
+
+    def test_rename_keeps_holds_intents_and_timetable(self):
+        self.butler.command("Bedroom", "NIGHT", at(22))
+        self.butler.tick(at(22))
+        holds, intents = copy.deepcopy(self.butler.holds), copy.deepcopy(self.butler.intents)
+        timetable = {key: self.butler.config[key] for key in TIMETABLE_KEYS}
+        self.assertEqual(1, len(intents))
+        self.butler.rename_bulb(MAC, "Reading lamp")
+        restarted = Butler(self.path, self.udp)
+        for butler in (self.butler, restarted):
+            self.assertEqual(holds, butler.holds)
+            self.assertEqual(intents, butler.intents)
+            self.assertEqual(timetable, {key: butler.config[key] for key in TIMETABLE_KEYS})
+
+    def test_rename_rejects_bad_input_without_changing_anything(self):
+        before, config = self.path.read_bytes(), copy.deepcopy(self.butler.config)
+        for mac, room in ((MAC, ""), (MAC, "   "), (MAC, None), (MAC, 7), (MAC, "x" * 101), (MAC, ["Kitchen"]),
+                          ("000000000000", "Kitchen"), (None, "Kitchen"), (7, "Kitchen")):
+            with self.subTest(mac=mac, room=room), self.assertRaises(ValueError):
+                self.butler.rename_bulb(mac, room)
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertEqual(config, self.butler.config)
+
+    def test_rename_rolls_back_on_save_failure(self):
+        self.butler.command("Bedroom", "NIGHT", at(22))
+        before, config = self.path.read_bytes(), copy.deepcopy(self.butler.config)
+        holds, intents = copy.deepcopy(self.butler.holds), copy.deepcopy(self.butler.intents)
+        with patch("wiz_butler.os.fsync", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            self.butler.rename_bulb(MAC, "Reading lamp")
+        self.assertEqual(config, self.butler.config)
+        self.assertEqual((holds, intents), (self.butler.holds, self.butler.intents))
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertEqual("Bedroom", self.butler.status()["config"]["bulbs"][0]["room"])
+
+    def test_rename_sends_no_bulb_traffic_and_does_not_wake_the_poll_loop(self):
+        self.butler.changed.clear()
+        self.udp.writes.clear()
+        with patch.object(self.udp, "request", side_effect=AssertionError("Rename must not contact a bulb")), \
+                patch.object(self.udp, "discover", side_effect=AssertionError("Rename must not discover")):
+            self.butler.rename_bulb(MAC, "Reading lamp")
+        self.assertEqual([], self.udp.writes)
+        self.assertFalse(self.butler.changed.is_set())
+
+    def test_two_bulbs_given_one_name_form_one_room(self):
+        second = self.seed_second_bulb()
+        self.butler.rename_bulb(MAC, "Kitchen")
+        self.butler.rename_bulb(second["mac"], "Kitchen")
+        self.assertEqual(["Kitchen", "Kitchen"], [b["room"] for b in self.butler.status()["config"]["bulbs"]])
+        self.assertEqual(2, self.butler.command("Kitchen", "NIGHT", at(22))["total"])
+        self.assertEqual({MAC, second["mac"]}, set(self.butler.intents))
+        with self.assertRaisesRegex(ValueError, "Room is not configured"):
+            self.butler.command("Bedroom", "NIGHT", at(22))
+
+    def test_rename_over_http(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.butler))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        def rename(value):
+            connection = http.client.HTTPConnection(*server.server_address, timeout=3)
+            connection.request("POST", "/v1/bulbs/rename", json.dumps(value))
+            response = connection.getresponse()
+            result = response.status, json.loads(response.read())
+            connection.close()
+            return result
+
+        code, status = rename({"mac": MAC, "room": "Reading lamp"})
+        self.assertEqual((200, "Reading lamp"), (code, status["config"]["bulbs"][0]["room"]))
+        self.assertIn("pilots", status)
+        for value in ({"mac": "000000000000", "room": "Kitchen"}, {"mac": MAC, "room": " "}, {"mac": MAC}, {"room": "Kitchen"}):
+            with self.subTest(value=value):
+                self.assertEqual(400, rename(value)[0])
+        with patch("wiz_butler.os.fsync", side_effect=OSError("disk full")):
+            self.assertEqual(503, rename({"mac": MAC, "room": "Kitchen"})[0])
+        self.assertEqual("Reading lamp", Butler(self.path, self.udp).config["bulbs"][0]["room"])
+
     def test_disabled_timetable_still_polls_authoritative_status(self):
         self.butler.configure(self.config | {"enabled": False})
         self.udp.state["state"] = False

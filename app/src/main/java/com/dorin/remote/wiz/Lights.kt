@@ -16,6 +16,9 @@ data class LightingCommandResult(val answered: Int, val total: Int, val statusAv
     }
 }
 
+/** What the phone keeps of the manager's settings: the timetable, not bulb names or addresses. */
+fun cachedManagerSettings(config: JSONObject): String = JSONObject(config.toString()).apply { remove("bulbs") }.toString()
+
 /** HTTP-only lighting client. There is deliberately no bulb network transport on Android. */
 class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) {
     constructor(prefs: Prefs) : this({ path, body -> ButlerClient.exchange(prefs.butlerUrl, path, body) })
@@ -99,6 +102,12 @@ class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) 
 
     suspend fun remove(mac: String) {
         acceptStatus(exchange("/v1/bulbs/remove", JSONObject().put("mac", mac)))
+    }
+
+    suspend fun rename(mac: String, room: String) {
+        val name = room.trim()
+        require(name.isNotEmpty()) { "Enter a bulb name" }
+        acceptStatus(exchange("/v1/bulbs/rename", JSONObject().put("mac", mac).put("room", name)))
     }
 
     suspend fun discover(): Map<String, Pilot> {

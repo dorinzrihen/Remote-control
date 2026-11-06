@@ -7,11 +7,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.windowInsetsBottomHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -25,6 +29,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -39,9 +44,11 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dorin.remote.RemoteViewModel
+import com.dorin.remote.wiz.BulbRenames
 import com.dorin.remote.wiz.LightMode
 import com.dorin.remote.wiz.RoomControlChoice
 import com.dorin.remote.wiz.ManagerConnection
@@ -58,6 +65,13 @@ fun ManagerConnectionIndicator(connection: ManagerConnection) {
         .semantics { contentDescription = connection.description })
 }
 
+@Composable
+private fun bulbFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = Accent, unfocusedBorderColor = Bg,
+    focusedTextColor = TextMain, unfocusedTextColor = TextMain, cursorColor = Accent,
+    focusedLabelColor = TextDim, unfocusedLabelColor = TextDim,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
@@ -72,6 +86,9 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
     val observationAges by vm.lights.observationAges.collectAsState()
     val roomControls by vm.lights.roomControls.collectAsState()
     var manageBulbs by remember { mutableStateOf(false) }
+    // Held here, above the sections polling can hide, so one failed poll cannot discard typing.
+    var renames by remember { mutableStateOf(BulbRenames()) }
+    LaunchedEffect(bulbs) { renames = renames.observe(bulbs) }
     val managerConnection by produceState(ManagerConnection.CHECKING, vm.lights) {
         vm.lights.managerConnection.checking()
         coroutineScope {
@@ -135,22 +152,45 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
             }
             ButlerSettings(vm)
 
-            if (loaded) {
+            if (loaded || renames.drafts.isNotEmpty()) {
                 PillButton(if (manageBulbs) "Done managing bulbs" else "Manage bulbs", modifier = Modifier.fillMaxWidth()) { manageBulbs = !manageBulbs }
                 if (manageBulbs) {
                     // ---- Saved bulbs ----
                     if (bulbs.isNotEmpty()) Text("Saved bulbs", color = TextDim, fontSize = 13.sp)
                     bulbs.forEach { b ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("${b.room}  ·  …${b.mac.takeLast(4)}" + if (pilots[b.mac] == null) "  ·  not reachable" else "", color = TextMain, fontSize = 13.sp)
-                                systemConfigs[b.mac]?.let { Text("${it.moduleName} · firmware ${it.fwVersion}", color = TextDim, fontSize = 11.sp) }
-                                observationAges[b.mac]?.let { Text("Manager last observed ${it}s ago", color = TextDim, fontSize = 11.sp) }
-                            }
-                            PillButton("Blink") { vm.blinkBulb(b.mac) }
-                            Spacer(Modifier.width(6.dp))
-                            PillButton("Remove", contentColor = Danger, onLongPress = { vm.removeBulb(b.mac) }) {
-                                vm.messages.tryEmit("Hold Remove to delete this bulb from the manager")
+                        key(b.mac) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Column {
+                                    Text("${b.room}  ·  …${b.mac.takeLast(4)}" + if (pilots[b.mac] == null) "  ·  not reachable" else "", color = TextMain, fontSize = 13.sp)
+                                    systemConfigs[b.mac]?.let { Text("${it.moduleName} · firmware ${it.fwVersion}", color = TextDim, fontSize = 11.sp) }
+                                    observationAges[b.mac]?.let { Text("Manager last observed ${it}s ago", color = TextDim, fontSize = 11.sp) }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    PillButton("Rename") { renames = renames.open(b) }
+                                    PillButton("Blink") { vm.blinkBulb(b.mac) }
+                                    PillButton("Remove", contentColor = Danger, onLongPress = { vm.removeBulb(b.mac) }) {
+                                        vm.messages.tryEmit("Hold Remove to delete this bulb from the manager")
+                                    }
+                                }
+                                renames.drafts[b.mac]?.let { draft ->
+                                    val saving = b.mac in renames.saving
+                                    val save = {
+                                        if (!saving) {
+                                            renames = renames.sending(b.mac)
+                                            vm.renameBulb(b.mac, draft) { saved -> renames = if (saved) renames.close(b.mac) else renames.failed(b.mac) }
+                                        }
+                                    }
+                                    // One line, so the buttons cannot end up behind the keyboard.
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        OutlinedTextField(
+                                            value = draft, onValueChange = { renames = renames.type(b.mac, it) }, label = { Text("Bulb name") },
+                                            singleLine = true, readOnly = saving, modifier = Modifier.weight(1f), colors = bulbFieldColors(),
+                                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { save() }),
+                                        )
+                                        PillButton(if (saving) "Saving…" else "Save", color = BulbOn, contentColor = Bg, onPress = save)
+                                        PillButton("Cancel") { if (!saving) renames = renames.close(b.mac) }
+                                    }
+                                }
                             }
                         }
                     }
@@ -166,12 +206,7 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
                                 Text("New bulb …${p.mac.takeLast(4)}  ·  $ip  ·  tap Blink to see which one it is", color = TextDim, fontSize = 12.sp)
                                 OutlinedTextField(
                                     value = room, onValueChange = { room = it }, label = { Text("Room") },
-                                    singleLine = true, modifier = Modifier.fillMaxWidth(),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = Accent, unfocusedBorderColor = Bg,
-                                        focusedTextColor = TextMain, unfocusedTextColor = TextMain, cursorColor = Accent,
-                                        focusedLabelColor = TextDim, unfocusedLabelColor = TextDim,
-                                    ),
+                                    singleLine = true, modifier = Modifier.fillMaxWidth(), colors = bulbFieldColors(),
                                 )
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     PillButton("Blink", modifier = Modifier.weight(1f), color = Bg) { vm.blinkBulb(p.mac) }
@@ -182,6 +217,8 @@ fun BulbsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
                     }
                 }
             }
+            // Room to scroll fields above the keyboard. imePadding() here stops the sheet expanding.
+            Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.ime))
         }
     }
 }

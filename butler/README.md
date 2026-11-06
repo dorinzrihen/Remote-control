@@ -29,7 +29,9 @@ timezone data. Keep the computer awake and connected to the bulb LAN.
    changing lights; old phone-saved bulbs are not imported. Android v1.7 lacks
    discovery; the separate unpublished Preview app has the new flow.
 4. Open **Manage bulbs → Find new bulbs → Blink → room → Add** to register bulbs.
-   Hold **Remove** to delete one from the manager; removal does not turn it off.
+   **Rename** changes a saved bulb's name on the manager; bulbs given the same name
+   form one room. Hold **Remove** to delete one from the manager; removal does not
+   turn it off.
    These operations work with the timetable enabled or disabled.
 5. Open **Edit timetable**, choose Night/Day times, home IANA timezone and polling
    interval, then **Save timetable**. The timetable switch changes only scheduling, not the
@@ -148,6 +150,7 @@ endpoints and the `--pair` command have been removed. Every response has
 | `POST /v1/discover` | `{}`; returns `discovered` observations and `status`; does not add bulbs |
 | `POST /v1/bulbs/add` | `{mac, ip, room}`; verifies identity and persists the bulb |
 | `POST /v1/bulbs/remove` | `{mac}`; removes the saved bulb/hold, without a light command |
+| `POST /v1/bulbs/rename` | `{mac, room}`; changes the saved name and returns status, with no bulb traffic; holds, intents and timetable are untouched; unknown MAC or invalid name returns 400 |
 | `POST /v1/bulbs/blink` | `{mac}`; identifies a saved or manager-discovered bulb |
 | `POST /v1/room` | `{room, mode}`; `REGULAR`, `NIGHT`, `OFF`, `ON`, `TOGGLE` or `AUTO` |
 
@@ -166,7 +169,8 @@ successful observation time. Android rejects mismatched/error pilots and ages
 over `max(5, pollSeconds × 3)` seconds; unknown/stale is **not** reported as off.
 If HTTP fails, Android clears current pilots and reports the manager unavailable.
 POST config never replaces bulbs: a differing `bulbs` list is rejected; even an
-old client's identical list is not adopted. Add/remove use the dedicated endpoints.
+old client's identical list is not adopted. Add/remove/rename use the dedicated
+endpoints.
 
 `POST /v1/config` accepts `enabled`, `night`, `morning`, `timezone`, `pollSeconds`.
 If supplied, `expectedConfig` must be an object containing **exactly those five

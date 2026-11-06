@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -15,11 +16,13 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-class ButlerRequestRejected(message: String) : IllegalStateException(message)
+class ButlerRequestRejected(message: String, val code: Int = 0) : IllegalStateException(message)
 
 /** Home-LAN connection to the sole lighting manager, never a UDP fallback. */
 object ButlerClient {
-    private val http = OkHttpClient.Builder().connectTimeout(3, TimeUnit.SECONDS)
+    // The manager closes every connection after replying. A pooled one would be dead, and a
+    // POST sent on it fails without arriving and must not be retried, so never pool them.
+    private val http = OkHttpClient.Builder().connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS)).connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(35, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build()
 
@@ -57,7 +60,7 @@ object ButlerClient {
                     if (response.code == 409 && path == "/v1/config") throw TimetableConflict()
                     // A timeout/server error cannot establish that a mutation had no effect.
                     if (response.code == 408 || response.code >= 500) throw IOException(result.optString("error", "Butler HTTP ${response.code}"))
-                    if (!response.isSuccessful) throw ButlerRequestRejected(result.optString("error", "Butler HTTP ${response.code}"))
+                    if (!response.isSuccessful) throw ButlerRequestRejected(result.optString("error", "Butler HTTP ${response.code}"), response.code)
                     return@withContext result
                 }
             } catch (failure: IOException) {
