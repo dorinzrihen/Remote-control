@@ -2,6 +2,7 @@ import copy
 from datetime import datetime
 import http.client
 import json
+import socket
 from pathlib import Path
 import tempfile
 import threading
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
-from wiz_butler import Butler, DEFAULT_CONFIG, MODES, Udp, handler, schedule, validate_config
+from wiz_butler import Butler, ConfigConflict, DEFAULT_CONFIG, MODES, TIMETABLE_KEYS, Udp, handler, schedule, validate_config
 
 MAC = "aabbccddeeff"
 BULB = {"mac": MAC, "ip": "192.168.1.20", "room": "Bedroom"}
@@ -38,6 +39,8 @@ class FakeUdp:
         self.writes.append((ip, method, dict(params)))
         if self.ack:
             self.state.update(params)
+            if "temp" in params:
+                self.state["sceneId"] = 0
             # Match observed hardware, not the published setState assumption.
             if method in ("setState", "setPilot") and "state" not in params:
                 self.state["state"] = True
@@ -45,6 +48,13 @@ class FakeUdp:
 
 
 class DiscoveryTest(unittest.TestCase):
+    def test_udp_write_does_not_blindly_retransmit_after_lost_ack(self):
+        with patch("wiz_butler.socket.socket") as socket_factory, patch("wiz_butler.time.monotonic", return_value=0):
+            sock = socket_factory.return_value.__enter__.return_value
+            sock.recv.side_effect = socket.timeout
+            self.assertIsNone(Udp("192.168.1.255").request(BULB["ip"], "setPilot", MODES["NIGHT"]))
+            self.assertEqual(1, sock.send.call_count)
+
     def test_malformed_lan_replies_do_not_abort_discovery(self):
         replies = [
             {"method": "getSystemConfig", "result": {"mac": 123}},
@@ -141,9 +151,33 @@ class ButlerTest(unittest.TestCase):
         second = datetime(2027, 10, 31, 2, 45, fold=1, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()
         self.assertEqual(schedule(config, first)[1], schedule(config, second)[1])
 
-    def test_startup_does_not_override(self):
+    def test_dst_fold_and_gap_reconciliation_uses_configured_zone(self):
+        zone = ZoneInfo("Europe/Berlin")
+        self.butler.configure(self.config | {"timezone": "Europe/Berlin", "night": "02:30"})
+        for now, expected in (
+            (datetime(2027, 3, 28, 3, 15, tzinfo=zone).timestamp(), "REGULAR"),
+            (datetime(2027, 3, 28, 3, 45, tzinfo=zone).timestamp(), "NIGHT"),
+            (datetime(2027, 10, 31, 2, 45, fold=0, tzinfo=zone).timestamp(), "NIGHT"),
+            (datetime(2027, 10, 31, 2, 45, fold=1, tzinfo=zone).timestamp(), "NIGHT"),
+        ):
+            with self.subTest(now=now):
+                self.udp.state.update(temp=4100, dimming=43)
+                self.butler.tick(now)
+                self.assertTrue(self.butler.matches(self.udp.state, MODES[expected]))
+
+    def test_timezone_edit_recomputes_expiry_from_absolute_request_time(self):
+        self.butler.command("Bedroom", "NIGHT", at(12, 17))
+        changed = self.config | {"timezone": "America/New_York", "night": "13:23"}
+        self.butler.configure(changed)
+        expiry = schedule(changed, at(12, 17))[2]
+        self.assertEqual(expiry, self.butler.holds[MAC])
+        self.butler.tick(expiry + 13)
+        self.assertNotIn(MAC, self.butler.holds)
+        self.assertTrue(self.butler.matches(self.udp.state, MODES[schedule(changed, expiry + 13)[0]]))
+
+    def test_startup_reconciles_current_timetable_without_boundary_event(self):
         self.butler.tick(at(22))
-        self.assertEqual([], self.udp.writes)
+        self.assertEqual([MODES["NIGHT"]], [write[2] for write in self.udp.writes])
 
     def test_evening_boundary(self):
         self.butler.tick(at(20, 59))
@@ -193,6 +227,20 @@ class ButlerTest(unittest.TestCase):
             self.assertFalse(self.butler.apply(BULB, "NIGHT"))
         self.assertEqual([], self.udp.writes)
 
+    def test_fresh_prewrite_read_already_matching_suppresses_udp_write(self):
+        original = self.udp.request
+
+        def fade_completes_between_reads(ip, method, params):
+            result = original(ip, method, params)
+            if method == "getPilot":
+                self.udp.state.update(MODES["NIGHT"])
+            return result
+
+        self.udp.request = fade_completes_between_reads
+        self.butler.tick(at(23, 17))
+        self.assertEqual([], self.udp.writes)
+        self.assertNotIn(MAC, self.butler.errors)
+
     def test_wall_on(self):
         self.udp.state["state"] = False
         self.butler.tick(at(22))
@@ -216,7 +264,7 @@ class ButlerTest(unittest.TestCase):
         restarted.tick(at(22, 2))
         self.udp.state = {"mac": MAC, "state": True, **MODES["REGULAR"]}
         restarted.tick(at(22, 3))
-        self.assertEqual(1, len(self.udp.writes))
+        self.assertEqual(0, len(self.udp.writes))  # Already matched: no redundant write.
         self.assertGreater(restarted.holds[MAC], at(22, 3))
 
     def test_manual_override_expires_at_next_boundary(self):
@@ -225,7 +273,7 @@ class ButlerTest(unittest.TestCase):
         self.butler.tick(at(6, day=6))
         self.assertEqual(MODES["REGULAR"], self.udp.writes[-1][2])
 
-    def test_external_manual_override(self):
+    def test_external_changes_are_corrected_not_inferred_as_overrides(self):
         self.butler.tick(at(22))
         self.udp.state.update({"temp": 4000, "dimming": 40})
         self.butler.tick(at(22, 1))
@@ -233,7 +281,9 @@ class ButlerTest(unittest.TestCase):
         self.butler.tick(at(22, 2))
         self.udp.state = {"mac": MAC, "state": True, "temp": 4000, "dimming": 40}
         self.butler.tick(at(22, 3))
-        self.assertEqual([], self.udp.writes)
+        self.assertEqual(3, len(self.udp.writes))
+        self.assertEqual(2700, self.udp.state["temp"])
+        self.assertNotIn(MAC, self.butler.holds)
 
     def test_manual_off_stays_off(self):
         self.butler.command("Bedroom", "OFF", at(22))
@@ -286,6 +336,222 @@ class ButlerTest(unittest.TestCase):
         self.assertEqual(0, result["answered"])
         self.assertIn(MAC, self.butler.holds)
 
+    def test_failed_schedule_adjustment_is_corrected_on_ordinary_next_poll(self):
+        self.udp.ack = False
+        self.butler.tick(at(23, 17))
+        self.assertIn("pending", self.butler.errors[MAC])
+        self.butler.pilot(BULB)  # Successful reads must not erase write failure.
+        self.assertIn("pending", self.butler.errors[MAC])
+        self.butler.tick(at(23, 18))
+        self.assertEqual(2, len(self.udp.writes))
+        self.assertNotIn(MAC, self.butler.holds)
+        self.udp.ack = True
+        self.butler.tick(at(23, 19))
+        self.assertEqual(2700, self.udp.state["temp"])
+        self.assertNotIn(MAC, self.butler.errors)
+        self.butler.tick(at(23, 20))
+        self.assertEqual(3, len(self.udp.writes))
+
+    def test_arbitrary_times_reconcile_invariant_not_events(self):
+        self.butler.configure(self.config | {"night": "13:37", "morning": "03:19"})
+        for hour in range(24):
+            for minute in (2, 23, 48):
+                with self.subTest(hour=hour, minute=minute):
+                    now = at(hour, minute)
+                    expected = MODES[schedule(self.butler.config, now)[0]]
+                    self.udp.state.update(temp=4100, dimming=43)
+                    before = len(self.udp.writes)
+                    self.butler.tick(now)
+                    self.assertTrue(self.butler.matches(self.udp.state, expected))
+                    self.butler.tick(now + 1)
+                    self.assertEqual(before + 1, len(self.udp.writes))
+                    self.assertFalse(self.butler.holds)
+
+    def test_unreachable_manual_intent_survives_restart_and_is_delivered(self):
+        self.udp.state = None
+        result = self.butler.command("Bedroom", "NIGHT", at(12, 17))
+        self.assertEqual(0, result["answered"])
+        self.assertEqual("NIGHT", self.butler.status()["intents"][MAC]["mode"])
+        stored = json.loads(self.path.read_text())
+        self.assertEqual(2, stored["schemaVersion"])
+        restarted = Butler(self.path, self.udp)
+        restarted.tick(at(12, 18))
+        self.udp.state = {"mac": MAC, "state": True, **MODES["REGULAR"]}
+        restarted.tick(at(12, 19))
+        self.assertEqual(2700, self.udp.state["temp"])
+        self.assertFalse(restarted.intents[MAC]["powerPending"])
+        self.assertFalse(Butler(self.path, self.udp).intents[MAC]["powerPending"])
+        restarted.tick(at(12, 20))
+        self.assertEqual(1, len(self.udp.writes))
+
+    def test_ambiguous_ack_applied_once_verified_without_repeating_power(self):
+        original = self.udp.request
+
+        def lose_ack(ip, method, params):
+            result = original(ip, method, params)
+            return None if method == "setPilot" else result
+
+        self.udp.request = lose_ack
+        result = self.butler.command("Bedroom", "NIGHT", at(12, 17))
+        self.assertEqual(0, result["answered"])
+        self.assertFalse(self.butler.intents[MAC]["powerPending"])
+        self.butler.tick(at(12, 18))
+        self.assertEqual(1, len(self.udp.writes))
+        self.udp.state["state"] = False
+        self.butler.tick(at(12, 19))
+        self.assertFalse(self.udp.state["state"])
+        self.assertEqual(1, len(self.udp.writes))
+
+    def test_success_ack_without_applied_setting_remains_pending(self):
+        original = self.udp.request
+
+        def lie_about_write(ip, method, params):
+            if method == "setPilot":
+                self.udp.writes.append((ip, method, dict(params)))
+                return {"success": True}
+            return original(ip, method, params)
+
+        self.udp.request = lie_about_write
+        self.assertEqual(0, self.butler.command("Bedroom", "NIGHT", at(12, 17))["answered"])
+        self.assertTrue(self.butler.intents[MAC]["powerPending"])
+        self.butler.tick(at(12, 18))
+        self.assertIn("pending", self.butler.errors[MAC])
+        self.assertEqual(2, len(self.udp.writes))
+        self.udp.request = original
+        self.butler.tick(at(12, 19))
+        self.assertFalse(self.butler.intents[MAC]["powerPending"])
+        self.assertNotIn(MAC, self.butler.errors)
+
+    def test_failed_explicit_on_and_off_reconcile_until_delivered(self):
+        for mode, initial in (("ON", False), ("OFF", True)):
+            with self.subTest(mode=mode):
+                self.udp.state = {"mac": MAC, "state": initial, **MODES["REGULAR"]}
+                self.udp.ack = False
+                self.assertEqual(0, self.butler.command("Bedroom", mode, at(23, 17))["answered"])
+                self.udp.ack = True
+                self.butler.tick(at(23, 18))
+                self.assertEqual(mode == "ON", self.udp.state["state"])
+                before = len(self.udp.writes)
+                self.butler.tick(at(23, 19))
+                self.assertEqual(before, len(self.udp.writes))
+
+    def test_follow_clears_unreachable_pending_intent_permanently(self):
+        self.udp.state = None
+        self.butler.command("Bedroom", "REGULAR", at(23, 17))
+        self.butler.command("Bedroom", "AUTO", at(23, 18))
+        restarted = Butler(self.path, self.udp)
+        self.assertNotIn(MAC, restarted.intents)
+        self.assertNotIn(MAC, restarted.holds)
+        self.udp.state = {"mac": MAC, "state": False, **MODES["REGULAR"]}
+        restarted.tick(at(23, 19))
+        self.assertEqual([], self.udp.writes)
+
+    def test_edit_recomputes_override_expiry_earlier_and_later(self):
+        for morning, expiry in (("05:13", at(5, 13, day=6)), ("08:47", at(8, 47, day=6))):
+            with self.subTest(morning=morning):
+                self.butler.configure(self.config)
+                self.butler.command("Bedroom", "NIGHT", at(23, 17))
+                self.butler.configure(self.config | {"morning": morning})
+                self.assertEqual(expiry, self.butler.holds[MAC])
+                restarted = Butler(self.path, self.udp)
+                restarted.tick(expiry - 1)
+                self.assertEqual(2700, self.udp.state["temp"])
+                restarted.tick(expiry + 17)
+                self.assertEqual(6500, self.udp.state["temp"])
+                self.assertNotIn(MAC, restarted.holds)
+                self.assertNotIn(MAC, restarted.intents)
+
+    def test_edit_boundary_into_past_expires_on_next_poll(self):
+        self.butler.command("Bedroom", "NIGHT", at(12, 17))
+        self.butler.configure(self.config | {"night": "13:23"})
+        self.butler.tick(at(14, 17))
+        self.assertNotIn(MAC, self.butler.intents)
+        self.assertNotIn(MAC, self.butler.holds)
+
+    def test_disabled_schedule_still_reconciles_explicit_pending_intent(self):
+        self.butler.configure(self.config | {"enabled": False})
+        self.udp.state = None
+        self.butler.command("Bedroom", "NIGHT", at(12, 17))
+        self.udp.state = {"mac": MAC, "state": True, **MODES["REGULAR"]}
+        self.butler.tick(at(12, 18))
+        self.assertEqual(2700, self.udp.state["temp"])
+        self.udp.state.update(MODES["REGULAR"])
+        self.butler.tick(at(12, 19))
+        self.assertEqual(2700, self.udp.state["temp"])
+        self.butler.tick(at(21, 1))
+        self.udp.state.update(MODES["REGULAR"])
+        self.butler.tick(at(21, 2))
+        self.assertEqual(6500, self.udp.state["temp"])
+
+    def test_legacy_hold_unknown_preset_preserved_until_expiry(self):
+        self.path.write_text(json.dumps({"config": self.config, "holds": {MAC: at(6, day=6)}}))
+        restarted = Butler(self.path, self.udp)
+        self.udp.state.update(temp=4100, dimming=43)
+        restarted.tick(at(23, 17))
+        restarted.save()
+        restarted = Butler(self.path, self.udp)
+        restarted.tick(at(23, 18))
+        self.assertEqual([], self.udp.writes)
+        self.assertNotIn(MAC, restarted.intents)
+        restarted.tick(at(6, 17, day=6))
+        self.assertEqual(6500, self.udp.state["temp"])
+
+    def test_schedule_off_invariant_even_after_failed_write(self):
+        self.udp.ack = False
+        self.butler.tick(at(23, 17))
+        self.udp.state["state"] = False
+        before = len(self.udp.writes)
+        self.udp.ack = True
+        for now in (at(23, 18), at(6, 17, day=6), at(22, 11, day=6)):
+            self.butler.tick(now)
+            self.assertFalse(self.udp.state["state"])
+            self.assertEqual(before, len(self.udp.writes))
+
+    def test_scene_mismatch_is_corrected_even_with_matching_temperature(self):
+        self.udp.state["sceneId"] = 5
+        self.butler.tick(at(12, 17))
+        self.assertEqual(1, len(self.udp.writes))
+        self.assertEqual(0, self.udp.state["sceneId"])
+
+    def test_expected_config_atomic_concurrent_save_and_conflict(self):
+        baseline = {key: self.config[key] for key in TIMETABLE_KEYS}
+        self.butler.command("Bedroom", "NIGHT", at(12, 17))
+        gate = threading.Barrier(3)
+        results = []
+
+        def save(night):
+            gate.wait()
+            try:
+                self.butler.configure(self.config | {"night": night, "expectedConfig": baseline})
+                results.append("saved")
+            except ConfigConflict:
+                results.append("conflict")
+
+        threads = [threading.Thread(target=save, args=(night,)) for night in ("22:13", "23:27")]
+        for thread in threads:
+            thread.start()
+        gate.wait()
+        for thread in threads:
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+        self.assertCountEqual(["saved", "conflict"], results)
+        before = self.path.read_text(), copy.deepcopy(self.butler.status())
+        with self.assertRaisesRegex(ConfigConflict, "Timetable changed on another device"):
+            self.butler.configure(self.config | {"expectedConfig": baseline})
+        self.assertEqual(before[0], self.path.read_text())
+        for field in ("config", "holds", "intents", "errors", "pilots"):
+            self.assertEqual(before[1][field], self.butler.status()[field])
+
+    def test_expected_config_strict_validation_and_legacy_compatibility(self):
+        expected = {key: self.config[key] for key in TIMETABLE_KEYS}
+        for invalid in (None, [], {}, expected | {"bulbs": []}, expected | {"pollSeconds": True},
+                        expected | {"enabled": 1}, expected | {"night": "bad"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.butler.configure(self.config | {"expectedConfig": invalid})
+        self.butler.configure(self.config | {"expectedConfig": expected, "night": "23:27"})
+        self.butler.configure(self.config)  # Old clients retain unconditional save.
+        self.assertEqual("21:00", self.butler.config["night"])
+
     def test_disabling_persists_and_stops_writes(self):
         self.butler.configure(self.config | {"enabled": False})
         self.butler.tick(at(20, 59))
@@ -323,7 +589,7 @@ class ButlerTest(unittest.TestCase):
         schedule_only = {key: value for key, value in self.config.items() if key != "bulbs"}
         self.butler.configure(schedule_only | {"night": "23:15"})
         self.assertEqual([BULB], self.butler.config["bulbs"])
-        self.assertEqual(at(6, day=6), self.butler.holds[MAC])
+        self.assertEqual(at(23, 15), self.butler.holds[MAC])
         self.assertEqual([], self.udp.writes)
         self.assertEqual([BULB], Butler(self.path, self.udp).config["bulbs"])
 
@@ -357,13 +623,26 @@ class ButlerTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.butler.command("Bedroom", "NIGHT", at(22))
         self.assertNotIn(MAC, self.butler.holds)
+        self.assertNotIn(MAC, self.butler.intents)
         self.assertEqual([], self.udp.writes)
 
-    def test_add_is_explicit_persists_room_and_never_applies_preset(self):
+    def test_atomic_save_failure_keeps_prior_state_and_intent(self):
+        self.butler.command("Bedroom", "NIGHT", at(12, 17))
+        before = self.path.read_text()
+        intent = copy.deepcopy(self.butler.intents)
+        with patch("wiz_butler.os.fsync", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError):
+                self.butler.command("Bedroom", "OFF", at(12, 18))
+        self.assertEqual(before, self.path.read_text())
+        self.assertEqual(intent, self.butler.intents)
+        self.assertEqual(intent, Butler(self.path, self.udp).intents)
+
+    def test_add_persists_room_without_writing_then_next_poll_reconciles(self):
         self.butler.add_bulb(BULB | {"room": "Kitchen"})
         self.assertEqual("Kitchen", Butler(self.path, self.udp).config["bulbs"][0]["room"])
-        self.butler.tick(at(22))
         self.assertEqual([], self.udp.writes)
+        self.butler.tick(at(22))
+        self.assertEqual(MODES["NIGHT"], self.udp.writes[-1][2])
 
     def test_add_rejects_wrong_identity_without_changing_manager_file(self):
         before = self.path.read_text()
@@ -501,6 +780,14 @@ class ButlerTest(unittest.TestCase):
         with patch.object(self.udp, "request", side_effect=AssertionError("GET is a cached manager snapshot")):
             self.assertEqual([BULB], request("GET", "/v1/status")[1]["config"]["bulbs"])
         self.assertEqual(400, request("POST", "/v1/config", self.config | {"bulbs": []})[0])
+        self.assertEqual(200, request("POST", "/v1/config", self.config)[0])
+        expected = {key: self.config[key] for key in TIMETABLE_KEYS}
+        self.assertEqual(200, request("POST", "/v1/config", self.config | {
+            "night": "23:27", "expectedConfig": expected})[0])
+        before = self.path.read_text()
+        conflict = request("POST", "/v1/config", self.config | {"expectedConfig": expected})
+        self.assertEqual((409, {"error": "Timetable changed on another device. Reload before saving."}), conflict)
+        self.assertEqual(before, self.path.read_text())
         self.assertEqual(200, request("POST", "/v1/config", self.config)[0])
         self.assertEqual(200, request("POST", "/v1/room", {"room": "Bedroom", "mode": "NIGHT"})[0])
         self.udp.found = {MAC: BULB["ip"]}

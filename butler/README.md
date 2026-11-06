@@ -34,8 +34,9 @@ timezone data. Keep the computer awake and connected to the bulb LAN.
 5. Open **Edit timetable**, choose Night/Day times, home IANA timezone and polling
    interval, then **Save timetable**. The timetable switch changes only scheduling, not the
    connection or ownership. Manual commands/status still require the manager
-   when the timetable is off. Save preserves bulbs and manual holds and sends no
-    light command. After an unconfirmed Save, reconnect before retrying.
+    when the timetable is off. Save preserves bulbs and explicit manual intent;
+    its next polling cycle uses the new timetable. After an unconfirmed Save,
+    reconnect before retrying. A conflicting edit must be reloaded before saving.
 
 ### Discovery scope and LAN trust
 
@@ -54,31 +55,53 @@ OpenCode and Tailscale authentication are separate and unchanged.
 Discovery does not traverse Tailscale or Wi-Fi client isolation automatically.
 
 State is atomically saved at `~/.local/state/uniremote-wiz/state.json` (0600),
-including bulb identities, timetable and manual holds. Updating the existing Mac
-manager with the same state path preserves its old configuration and holds; no
-phone list upload or migration is needed. Run one manager per home/state file.
-Older Android apps and other controllers can bypass its bookkeeping.
+including bulb identities, timetable, manual holds and explicit desired intent.
+Schema version 2 retains the old `config`/`holds` fields. Updating with the same
+state path preserves configuration and legacy timestamp-only holds: their preset
+is unknown, so the manager leaves their observed settings alone until the stored
+expiry, including across restarts. It does not invent a preset during migration.
+New explicit holds carry their request time and preset; timetable edits recompute
+their expiry from that request against the edited timetable. Legacy holds retain
+their original expiry because their request time is unknown. No phone upload is
+needed. Run one manager per home/state file; keep a state backup before upgrading.
 
 ## Behavior and limitations
 
 - Defaults: Night **21:00–06:00**, **20%, 2700K**; Regular **100%, 6500K**.
   Times (including minutes) and home timezone are editable. Daylight saving uses
-  that timezone; ambiguous boundaries fire once and spring gaps normalize forward.
+  that timezone; ambiguous boundaries resolve once and spring gaps normalize forward.
 - Saved bulbs are polled even when scheduling is disabled. Default interval is
   **1 second**, editable **1–300 seconds**, including query time; timeouts can
   overrun it. Timetable boundaries wake the loop sooner. IP rediscovery runs
   every minute; new bulbs still require explicit Add.
-- When enabled, each Night/Day boundary or detected off/unreachable → on event
-  applies the current preset to on, unheld bulbs. Off/unreachable bulbs are skipped.
-  Startup, adding a bulb and settings Save establish a baseline, not a preset
-  write. An already-on bulb may wait for a later On event, boundary or Follow.
-- **On/Off/Regular/Night** (including the on/off toggle) persist manual holds until
-  the **next timetable boundary**, surviving restart. **On** selects the current
-  home-time preset and **also creates a hold**; it does not resume automatic mode.
-  Only **Follow timetable** (`AUTO`) explicitly clears a hold, applies the current
-  preset to on bulbs and leaves off bulbs off. It requires an enabled timetable.
-  Observed external colour/brightness changes while already on also create holds
-  when scheduling is enabled.
+- Every cycle reads each saved bulb and compares it with the current desired
+  settings: an explicit manual override, otherwise the editable timetable when
+  enabled. On bulbs with a mismatch are corrected even at startup and arbitrary
+  non-boundary times; matching bulbs receive no write. Timetable changes never
+  request power: off bulbs stay off. Unreachable bulbs are read again next cycle.
+  Add and Save themselves send no command, but the next poll reconciles on bulbs.
+- **On/Off/Regular/Night** (including the on/off toggle) persist their explicit
+  desired settings until the **next configured timetable boundary**, surviving
+  unreachable bulbs, lost acknowledgements and restart. **On** captures the current
+  home-time preset; it does not resume automatic mode. As before, explicit On,
+  Regular and Night requests can turn a bulb on. Their power-on request remains
+  pending until a read verifies the desired state; thereafter only their preset
+  is reconciled on already-on bulbs, so a later wall/software Off stays off.
+  Explicit Off is reconciled as Off until expiry. Preset intent remains stored
+  while a bulb is off and is corrected when it is next observed on.
+- **Follow timetable** (`AUTO`) clears explicit/legacy holds and pending power
+  intent, applies the current preset to on bulbs and leaves off bulbs off. It
+  requires an enabled timetable. Disabling the timetable stops automatic preset
+  adjustments, not reads or reconciliation of unexpired explicit manual intent.
+- Manual overrides now come **only from manager commands**, not inferred external
+  colour/brightness changes. External changes are corrected to desired settings,
+  not mistaken for a hold that suppresses correction. Other controllers/native
+  automations must not compete with this sole-owner manager.
+- Every mismatch is observed again next cycle regardless of the last write's
+  result. A failed/ambiguous write does not consume intent. Writes are not blindly
+  retransmitted within a UDP request; acknowledgement alone is not proof of the
+  setting being applied. A fresh successful read does not clear an error while
+  the desired mismatch remains unresolved.
 - Every write checks the bulb's MAC at its current IP. Blink is serialized with
   scheduling, preserves holds and attempts to restore the original power/preset;
   a failed restore is reported for inspection. Disabling scheduling is not needed
@@ -87,8 +110,9 @@ Older Android apps and other controllers can bypass its bookkeeping.
   The old Android receiver only cancels leftover alarms on upgrade/startup; it
   never schedules or controls lights.
 - Wall power restoration must include boot/Wi-Fi reconnection before correction.
-  A network outage looks like power loss; fast off/on cycles between polls and
-  changes during fades can be missed. There is no guaranteed wall-On latency.
+  A network outage looks like power loss; fast off/on cycles between polls can
+  be missed. Fades that still mismatch on the next read are corrected again.
+  There is no guaranteed wall-On latency.
 - Live tests found that even `setState` without `state:true` can turn an off bulb
   on. Automatic writes use guarded `setPilot` with a fresh on-state check, but
   another controller can still race the read/write pair. Avoid competing native
@@ -105,7 +129,7 @@ endpoints and the `--pair` command have been removed. Every response has
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/status`, `GET /v1/config` | Same cached manager status; no direct bulb query per GET |
-| `POST /v1/config` | Timetable only: `enabled`, `night`, `morning`, `timezone`, `pollSeconds` |
+| `POST /v1/config` | Timetable fields; optional `expectedConfig` baseline for conflict protection |
 | `POST /v1/discover` | `{}`; returns `discovered` observations and `status`; does not add bulbs |
 | `POST /v1/bulbs/add` | `{mac, ip, room}`; verifies identity and persists the bulb |
 | `POST /v1/bulbs/remove` | `{mac}`; removes the saved bulb/hold, without a light command |
@@ -115,12 +139,31 @@ endpoints and the `--pair` command have been removed. Every response has
 Status includes `config` (with manager-owned `bulbs`), MAC-keyed `pilots`,
 `systemConfigs` (read-only hardware/firmware), `observedAt` (last successful read,
 Unix seconds), `errors`, `holds`, plus `lastPoll`, `statusAt` and `native:false`.
+The additive `intents` map contains `{mode, createdAt, powerPending}` per explicitly
+held MAC; legacy unknown holds have no entry. `holds` remains absolute Unix expiry
+seconds for old/new clients' Follow indicators. An override is removed on the first
+poll at/after expiry; no boundary event needs to have succeeded.
 An unreachable/MAC-mismatched bulb loses its current pilot, but retains its last
 successful observation time. Android rejects mismatched/error pilots and ages
 over `max(5, pollSeconds × 3)` seconds; unknown/stale is **not** reported as off.
 If HTTP fails, Android clears current pilots and reports the manager unavailable.
 POST config never replaces bulbs: a differing `bulbs` list is rejected; even an
 old client's identical list is not adopted. Add/remove use the dedicated endpoints.
+
+`POST /v1/config` accepts `enabled`, `night`, `morning`, `timezone`, `pollSeconds`.
+If supplied, `expectedConfig` must be an object containing **exactly those five
+fields**, with the same validation as a timetable (including integer polling
+seconds). Under the configuration lock, the manager compares it with the current
+timetable only, not bulbs or observations. A stale baseline returns **409** with
+`{"error":"Timetable changed on another device. Reload before saving."}` and
+changes neither configuration, holds, intent nor the saved file. Malformed
+baselines return 400. Omitting `expectedConfig` preserves legacy unconditional
+Save behavior. Clients should reload after a conflict, not retry the stale form.
+
+Room responses retain `{answered, total, errors}`. `answered` counts verified
+matches/no-ops and acknowledged writes whose readback matches; a lost write ACK
+still counts zero even if a subsequent read confirms delivery. It does not mean
+the manager forgot a request: pending intent remains and future cycles reconcile.
 
 ## Service and upgrade
 

@@ -21,6 +21,11 @@ from bonjour import Bonjour
 
 MODES = {"REGULAR": {"dimming": 100, "temp": 6500}, "NIGHT": {"dimming": 20, "temp": 2700}}
 DEFAULT_CONFIG = {"enabled": False, "night": "21:00", "morning": "06:00", "timezone": "Asia/Jerusalem", "pollSeconds": 1, "bulbs": []}
+TIMETABLE_KEYS = ("enabled", "night", "morning", "timezone", "pollSeconds")
+
+
+class ConfigConflict(ValueError):
+    pass
 
 
 def validate_config(value):
@@ -79,10 +84,6 @@ def schedule(config, now):
     return previous[1], previous[0], following
 
 
-def signature(pilot):
-    return tuple(pilot.get(key) for key in ("state", "sceneId", "temp", "dimming", "r", "g", "b", "w", "c"))
-
-
 class Udp:
     def __init__(self, broadcast):
         self.broadcast = broadcast
@@ -94,7 +95,9 @@ class Udp:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.connect((ip, 38899))
                 sock.settimeout(0.7)
-                for _ in range(2):
+                # Reads may be retried; writes are observed next cycle rather
+                # than blindly repeated after an ambiguous acknowledgement.
+                for _ in range(2 if method.startswith("get") else 1):
                     sock.send(packet)
                     end = time.monotonic() + 0.7
                     while time.monotonic() < end:
@@ -138,9 +141,8 @@ class Butler:
         stored = json.loads(self.path.read_text()) if self.path.exists() else {}
         self.config = validate_config(stored.get("config", DEFAULT_CONFIG))
         self.holds = stored.get("holds", {})
-        self.previous = {}
+        self.intents = stored.get("intents", {})
         self.addresses = {}
-        self.last_boundary = None
         self.last_discovery = 0
         self.errors = {}
         self.last_poll = None
@@ -153,13 +155,21 @@ class Butler:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         with open(temporary, "w", opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
-            json.dump({"config": self.config, "holds": self.holds}, output, indent=2)
+            json.dump({"schemaVersion": 2, "config": self.config, "holds": self.holds,
+                       "intents": self.intents}, output, indent=2)
             output.flush()
             os.fsync(output.fileno())
         temporary.replace(self.path)
 
     def configure(self, value):
         with self.lock:
+            if "expectedConfig" in value:
+                expected = value["expectedConfig"]
+                if not isinstance(expected, dict) or set(expected) != set(TIMETABLE_KEYS):
+                    raise ValueError("expectedConfig must contain the five timetable fields")
+                expected = validate_config(expected | {"bulbs": []})
+                if any(expected[key] != self.config[key] for key in TIMETABLE_KEYS):
+                    raise ConfigConflict("Timetable changed on another device. Reload before saving.")
             # Bulbs have dedicated add/remove operations. In particular an old
             # or newly installed phone must never erase this manager's list.
             if "bulbs" in value and value["bulbs"] != self.config["bulbs"]:
@@ -167,15 +177,15 @@ class Butler:
             config = validate_config(value | {"bulbs": self.config["bulbs"]})
             # Preserve holds, observations and known addresses. Saving a
             # timetable is not a lighting action or a discovery reset.
-            old_config = self.config
+            old_config, old_holds = self.config, dict(self.holds)
             self.config = config
+            for mac, intent in self.intents.items():
+                self.holds[mac] = schedule(config, intent["createdAt"])[2]
             try:
                 self.save()
             except OSError:
-                self.config = old_config
+                self.config, self.holds = old_config, old_holds
                 raise
-            self.previous.clear()
-            self.last_boundary = None
             self.changed.set()
 
     def rediscover(self):
@@ -216,8 +226,6 @@ class Butler:
             except OSError:
                 self.config = old
                 raise
-            # Do not interpret adding an already-on bulb as a wall-switch event.
-            self.previous.pop(bulb["mac"], None)
             self.read_system_config(bulb)
             self.changed.set()
             return self.status()
@@ -226,15 +234,16 @@ class Butler:
         with self.lock:
             if not isinstance(mac, str) or not any(b["mac"] == mac for b in self.config["bulbs"]):
                 raise ValueError("Bulb is not configured on the manager")
-            old, holds = self.config, dict(self.holds)
+            old, holds, intents = self.config, dict(self.holds), dict(self.intents)
             self.config = self.config | {"bulbs": [b for b in self.config["bulbs"] if b["mac"] != mac]}
             self.holds.pop(mac, None)
+            self.intents.pop(mac, None)
             try:
                 self.save()
             except OSError:
-                self.config, self.holds = old, holds
+                self.config, self.holds, self.intents = old, holds, intents
                 raise
-            for cache in (self.previous, self.observed, self.observed_at, self.errors, self.system_configs):
+            for cache in (self.observed, self.observed_at, self.errors, self.system_configs):
                 cache.pop(mac, None)
             return self.status()
 
@@ -268,7 +277,6 @@ class Butler:
             finally:
                 # Also attempt restoration after a lost flash acknowledgement.
                 restored = not needs_restore or self.write(bulb, "setPilot", restore)
-                self.previous.pop(mac, None)
                 self.pilot(bulb)
                 if not restored:
                     raise ValueError("Blink restore failed (unreachable, MAC mismatch or no acknowledgement); check bulb state")
@@ -292,16 +300,17 @@ class Butler:
             self.errors[bulb["mac"]] = "unreachable or MAC mismatch"
             self.observed.pop(bulb["mac"], None)
             return None
-        self.errors.pop(bulb["mac"], None)
         self.observed[bulb["mac"]] = pilot
         self.observed_at[bulb["mac"]] = time.time()
         return pilot
 
-    def write(self, bulb, method, params, only_if_on=False):
+    def write(self, bulb, method, params, only_if_on=False, only_if_different=False):
         # Every write, including blink restoration, verifies identity afresh.
         current = self.pilot(bulb)
         if current is None or (only_if_on and not current["state"]):
             return False
+        if only_if_different and self.matches(current, params):
+            return True
         result = self.udp.request(self.addresses.get(bulb["mac"], bulb["ip"]), method, params)
         ok = isinstance(result, dict) and result.get("success") is True
         if not ok:
@@ -331,37 +340,77 @@ class Butler:
                 except OSError:
                     logging.warning("Discovery failed; retaining known addresses")
                 self.last_discovery = now
-            mode, boundary, following = schedule(self.config, now)
-            crossed = self.last_boundary is not None and boundary != self.last_boundary
-            dirty = False
+            self.expire_intents(now)
             for bulb in self.config["bulbs"]:
-                mac = bulb["mac"]
                 current = self.pilot(bulb)
-                if mac not in self.system_configs:
+                if bulb["mac"] not in self.system_configs:
                     self.read_system_config(bulb)
-                known = mac in self.previous
-                previous = self.previous.get(mac)
-                self.previous[mac] = current
-                if not self.config["enabled"]:
-                    continue
-                if current is None or not current["state"]:
-                    continue
-                # External colour/brightness changes while on are manual too.
-                # Do not infer such a change from a lost packet or power cycle.
-                if previous and previous["state"] and signature(current) != signature(previous):
-                    self.holds[mac] = following
-                    dirty = True
-                held = self.holds.get(mac, 0) > now
-                turned_on = known and (previous is None or not previous["state"])
-                if not held and (crossed or turned_on):
-                    if self.apply(bulb, mode):
-                        # Global bulb fades can take seconds; baseline the next
-                        # poll rather than mistake an intermediate fade for an
-                        # external manual override.
-                        self.previous.pop(mac, None)
-            self.last_boundary = boundary
-            if dirty:
+                self.reconcile(bulb, now, current)
+
+    def expire_intents(self, now):
+        expired = [mac for mac, until in self.holds.items() if until <= now]
+        if expired:
+            holds, intents = dict(self.holds), dict(self.intents)
+            for mac in expired:
+                self.holds.pop(mac, None)
+                self.intents.pop(mac, None)
+            try:
                 self.save()
+            except OSError:
+                self.holds, self.intents = holds, intents
+                raise
+
+    def desired(self, bulb, now, current):
+        mac = bulb["mac"]
+        intent = self.intents.get(mac)
+        if intent:
+            if intent["mode"] == "OFF":
+                return {"state": False}
+            preset = MODES[intent["mode"]]
+            # Power is a one-time explicit request, not permission to undo a
+            # subsequent wall-switch OFF on every poll. Keep it pending until
+            # a read verifies delivery, including after an ambiguous UDP reply.
+            if intent["powerPending"]:
+                return {"state": True, **preset}
+            return preset if current["state"] else {}
+        if mac in self.holds or not self.config["enabled"]:
+            return {}  # Legacy hold: its unknown preset must not be invented.
+        return MODES[schedule(self.config, now)[0]] if current["state"] else {}
+
+    @staticmethod
+    def matches(current, desired):
+        return all(current.get(key) == value for key, value in desired.items()) and (
+            "temp" not in desired or current.get("sceneId", 0) == 0)
+
+    def reconcile(self, bulb, now, current):
+        if current is None:
+            return False
+        mac = bulb["mac"]
+        desired = self.desired(bulb, now, current)
+        acknowledged = True
+        if not self.matches(current, desired):
+            self.errors[mac] = "desired state pending"
+            acknowledged = self.write(bulb, "setPilot", desired, only_if_on="state" not in desired,
+                                      only_if_different=True)
+            current = self.pilot(bulb)
+            if current is None:
+                return False
+            # Do not treat a fresh OFF as permission to power it on. Recompute
+            # relative-only intent after the fresh pre-write safety check.
+            desired = self.desired(bulb, now, current)
+        if self.matches(current, desired):
+            intent = self.intents.get(mac)
+            if intent and intent["powerPending"] and intent["mode"] != "OFF":
+                self.intents[mac] = intent | {"powerPending": False}
+                try:
+                    self.save()
+                except OSError:
+                    self.intents[mac] = intent
+                    raise
+            self.errors.pop(mac, None)
+            return acknowledged
+        self.errors[mac] = "desired state pending" if acknowledged else "command not acknowledged; desired state pending"
+        return False
 
     def command(self, room, mode, now):
         if not isinstance(room, str) or mode not in (*MODES, "OFF", "AUTO", "ON", "TOGGLE"):
@@ -377,36 +426,29 @@ class Butler:
             pilots = {bulb["mac"]: self.pilot(bulb) for bulb in bulbs}
             if mode == "TOGGLE":
                 mode = "OFF" if any(p and p["state"] for p in pilots.values()) else "ON"
+            self.expire_intents(now)
             current_mode, _, following = schedule(self.config, now)
-            old_holds = dict(self.holds)
+            old_holds, old_intents = dict(self.holds), dict(self.intents)
             for bulb in bulbs:
                 if mode == "AUTO":
                     self.holds.pop(bulb["mac"], None)
+                    self.intents.pop(bulb["mac"], None)
                 else:
                     self.holds[bulb["mac"]] = following
+                    self.intents[bulb["mac"]] = {"mode": current_mode if mode == "ON" else mode,
+                                                "createdAt": now, "powerPending": mode != "OFF"}
             # Persist intent before writing, so restart or a lost UDP reply
             # cannot cause the scheduler to undo a manual action.
             try:
                 self.save()
             except OSError:
-                self.holds = old_holds
+                self.holds, self.intents = old_holds, old_intents
                 raise
             ok = 0
             for bulb in bulbs:
-                pilot = pilots[bulb["mac"]]
-                if pilot is None:
-                    continue
-                if mode == "AUTO":
-                    success = not pilot["state"] or self.apply(bulb, current_mode)
-                else:
-                    preset = current_mode if mode == "ON" else mode
-                    params = {"state": mode != "OFF"} | (MODES[preset] if preset in MODES else {})
-                    success = self.write(bulb, "setPilot", params)
-                if success:
+                if self.reconcile(bulb, now, pilots[bulb["mac"]]):
                     ok += 1
-                self.previous.pop(bulb["mac"], None)
-                if success:
-                    self.pilot(bulb)
+            self.changed.set()
             return {"answered": ok, "total": len(bulbs), "errors": dict(self.errors)}
 
     def status(self):
@@ -414,6 +456,7 @@ class Butler:
             bulbs = [b | {"ip": self.addresses.get(b["mac"], b["ip"])} for b in self.config["bulbs"]]
             saved = {b["mac"] for b in bulbs}
             return {"config": self.config | {"bulbs": bulbs}, "holds": dict(self.holds), "errors": dict(self.errors),
+                    "intents": {mac: dict(intent) for mac, intent in self.intents.items()},
                     "pilots": {mac: p for mac, p in self.observed.items() if mac in saved},
                     "systemConfigs": {mac: c for mac, c in self.system_configs.items() if mac in saved},
                     "observedAt": {mac: at for mac, at in self.observed_at.items() if mac in saved},
@@ -464,6 +507,8 @@ def handler(butler):
                     self.respond(200, butler.blink(value.get("mac")))
                 else:
                     self.respond(404, {"error": "Not found"})
+            except ConfigConflict as error:
+                self.respond(409, {"error": str(error)})
             except (ValueError, TypeError) as error:
                 self.respond(400, {"error": str(error)})
             except OSError:
@@ -497,7 +542,7 @@ def main():
             try:
                 butler.tick(time.time())
             except Exception:
-                logging.exception("Poll failed; no automatic retry of writes")
+                logging.exception("Poll failed; next cycle will read and reconcile again")
             butler.changed.wait(butler.poll_delay(time.time(), time.monotonic() - started))
 
     worker = threading.Thread(target=poll, daemon=True)
