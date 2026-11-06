@@ -18,8 +18,14 @@ data class TimetableEditor(val baseline: Timetable, val draft: Timetable = basel
     val conflict: Boolean get() = rejected || (dirty && latest != baseline)
     fun observe(current: Timetable): TimetableEditor = if (!dirty && !rejected) TimetableEditor(current) else copy(latest = current)
     fun reload() = TimetableEditor(latest)
-    /** Explicitly keep the draft on top of the latest manager settings. Save still checks again. */
-    fun reapply() = copy(baseline = latest, rejected = false)
+    /** Only local changes override latest, including when both clients edited the same field. */
+    fun reapply() = copy(baseline = latest, rejected = false, draft = latest.copy(
+        enabled = if (draft.enabled != baseline.enabled) draft.enabled else latest.enabled,
+        night = if (draft.night != baseline.night) draft.night else latest.night,
+        morning = if (draft.morning != baseline.morning) draft.morning else latest.morning,
+        timezone = if (draft.timezone != baseline.timezone) draft.timezone else latest.timezone,
+        pollSeconds = if (draft.pollSeconds != baseline.pollSeconds) draft.pollSeconds else latest.pollSeconds,
+    ))
 }
 
 class TimetableConflict : IllegalStateException("Timetable changed on another phone")

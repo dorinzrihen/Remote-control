@@ -235,6 +235,50 @@ class ManagerLightsTest {
         assertEquals(1, calls)
     }
 
+    @Test fun everyMutationIsSentOnceDespite503RetryAfterZero() = runBlocking {
+        for (path in listOf("/v1/room", "/v1/config", "/v1/discover", "/v1/bulbs/add", "/v1/bulbs/remove", "/v1/bulbs/blink")) {
+            val server = MockWebServer()
+            server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0").setBody("{}"))
+            server.enqueue(MockResponse().setBody("""{"answered":1,"total":1}"""))
+            server.start()
+            try {
+                try {
+                    ButlerClient.exchange(server.url("/").toString(), path, JSONObject().put("mode", "TOGGLE"))
+                    fail("503 must not replay $path")
+                } catch (e: java.io.IOException) {
+                    assertTrue(lightingCommandFailure(e).contains("outcome unknown"))
+                    assertTrue(e.message!!.contains("503"))
+                }
+                assertEquals(path, 1, server.requestCount)
+                val request = server.takeRequest()
+                assertEquals("POST", request.method)
+                assertEquals(path, request.path)
+                assertEquals("TOGGLE", JSONObject(request.body.readUtf8()).getString("mode"))
+            } finally { server.shutdown() }
+        }
+    }
+
+    @Test fun timeoutAndAuthenticationResponsesNeverReplayMutation() = runBlocking {
+        for (code in listOf(408, 401, 407)) {
+            val server = MockWebServer()
+            server.enqueue(MockResponse().setResponseCode(code).setHeader("Retry-After", "0")
+                .setHeader("WWW-Authenticate", "Basic realm=manager").setHeader("Proxy-Authenticate", "Basic realm=manager").setBody("{}"))
+            server.enqueue(MockResponse().setBody("""{"answered":1,"total":1}"""))
+            server.start()
+            try {
+                try {
+                    ButlerClient.exchange(server.url("/").toString(), "/v1/room", JSONObject().put("mode", "TOGGLE"))
+                    fail("$code must not replay TOGGLE")
+                } catch (e: Exception) {
+                    assertTrue(e is java.io.IOException || e is com.dorin.remote.wiz.ButlerRequestRejected)
+                    if (code == 408) assertTrue(lightingCommandFailure(e).contains("outcome unknown"))
+                }
+                assertEquals("HTTP $code", 1, server.requestCount)
+                assertEquals("POST", server.takeRequest().method)
+            } finally { server.shutdown() }
+        }
+    }
+
     @Test fun httpRequestsNeedNoCredentialsForAnyEndpointAndExposeServerErrors() = runBlocking {
         val server = MockWebServer()
         repeat(6) { server.enqueue(MockResponse().setBody("{}")) }

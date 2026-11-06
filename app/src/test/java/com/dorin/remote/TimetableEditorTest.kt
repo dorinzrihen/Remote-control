@@ -36,7 +36,7 @@ class TimetableEditorTest {
         assertTrue(editor.conflict)
         assertEquals(draft, editor.draft)
         assertEquals(external, editor.reload().draft)
-        assertEquals(draft, editor.reapply().draft)
+        assertEquals(draft.copy(night = external.night), editor.reapply().draft)
         assertEquals(external, editor.reapply().baseline)
         assertFalse(editor.reapply().conflict)
     }
@@ -53,6 +53,60 @@ class TimetableEditorTest {
         assertEquals(listOf("/v1/status"), calls)
         assertEquals("08:00", editor.draft.morning)
         assertTrue(editor.conflict)
+    }
+
+    @Test fun reapplyMergesLocalMorningWithExternalNightAndSavesAgainstLatest() = runBlocking {
+        val editor = TimetableEditor(initial, initial.copy(morning = "07:00"), external).reapply()
+        val merged = external.copy(morning = "07:00")
+        assertEquals(external, editor.baseline)
+        assertEquals(merged, editor.draft)
+        assertTrue(editor.dirty)
+        assertFalse(editor.conflict)
+        val calls = mutableListOf<String>()
+        saveTimetable(editor, { path, body ->
+            calls += path
+            if (body == null) status(external) else {
+                assertEquals(external, Timetable.from(body.getJSONObject("expectedConfig")))
+                assertEquals(merged, Timetable.from(body))
+                status(merged)
+            }
+        }, {})
+        assertEquals(listOf("/v1/status", "/v1/config"), calls)
+    }
+
+    @Test fun reapplyOverlaysEachOfTheFiveChangedFieldsButPreservesEveryUntouchedField() {
+        val latest = Timetable(false, "23:00", "09:00", "Europe/London", "30")
+        val localChanges = listOf(
+            initial.copy(enabled = false) to latest,
+            initial.copy(night = "22:30") to latest.copy(night = "22:30"),
+            initial.copy(morning = "07:00") to latest.copy(morning = "07:00"),
+            initial.copy(timezone = "America/New_York") to latest.copy(timezone = "America/New_York"),
+            initial.copy(pollSeconds = "5") to latest.copy(pollSeconds = "5"),
+        )
+        localChanges.forEach { (draft, expected) ->
+            val editor = TimetableEditor(initial, draft, latest, rejected = true).reapply()
+            assertEquals(expected, editor.draft)
+            assertEquals(latest, editor.baseline)
+            assertEquals(latest, editor.latest)
+            assertEquals(expected != latest, editor.dirty)
+            assertFalse(editor.conflict)
+        }
+        // Re-enable is also an explicit local change, not a truthy/default fallback.
+        val disabled = initial.copy(enabled = false)
+        assertTrue(TimetableEditor(disabled, initial, latest).reapply().draft.enabled)
+    }
+
+    @Test fun reapplyWithoutLocalChangesAdoptsLatestAndWithoutExternalChangesKeepsDraft() {
+        val untouched = TimetableEditor(initial, initial, external).reapply()
+        assertEquals(external, untouched.draft)
+        assertEquals(external, untouched.baseline)
+        assertFalse(untouched.dirty)
+        val draft = initial.copy(morning = "07:00", enabled = false, pollSeconds = "3")
+        val unchangedBaseline = TimetableEditor(initial, draft).reapply()
+        assertEquals(initial, unchangedBaseline.baseline)
+        assertEquals(draft, unchangedBaseline.draft)
+        assertTrue(unchangedBaseline.dirty)
+        assertFalse(unchangedBaseline.conflict)
     }
 
     @Test fun normalSaveContainsOnlyTimetableAndExpectedBaselineNotBulbs() = runBlocking {
