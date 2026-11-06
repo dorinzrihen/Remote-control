@@ -1,6 +1,5 @@
 package com.dorin.remote
 
-import com.dorin.remote.wiz.Bulb
 import com.dorin.remote.wiz.ButlerClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,19 +7,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ButlerTest {
-    @Test fun configUsesSavedIdentitiesAndExplicitHomeTimezone() {
-        val c = ButlerClient.config(true, "21:00", "06:00", "Asia/Jerusalem", listOf(Bulb("aabbccddeeff", "192.168.1.2", "Bedroom")))
+    @Test fun configOnlySavesTimetableNeverPhoneBulbs() {
+        val c = ButlerClient.config(true, "21:00", "06:00", "Asia/Jerusalem")
         assertTrue(c.getBoolean("enabled"))
         assertEquals("21:00", c.getString("night"))
         assertEquals("06:00", c.getString("morning"))
         assertEquals("Asia/Jerusalem", c.getString("timezone"))
         assertEquals(1, c.getInt("pollSeconds"))
-        assertEquals("aabbccddeeff", c.getJSONArray("bulbs").getJSONObject(0).getString("mac"))
+        assertFalse(c.has("bulbs"))
         assertFalse(c.has("setSchdPset"))
     }
 
     @Test fun customTimetableAndPollingAreUploadedNotHardcoded() {
-        val c = ButlerClient.config(true, "22:15", "07:45", "Europe/Berlin", emptyList(), 17)
+        val c = ButlerClient.config(true, "22:15", "07:45", "Europe/Berlin", 17)
         assertEquals("22:15", c.getString("night"))
         assertEquals("07:45", c.getString("morning"))
         assertEquals("Europe/Berlin", c.getString("timezone"))

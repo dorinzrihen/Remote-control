@@ -1,99 +1,104 @@
 package com.dorin.remote.wiz
 
 import com.dorin.remote.Prefs
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import org.json.JSONArray
 import org.json.JSONObject
 
-/** A saved bulb. The MAC is its identity; the IP is refreshed from discovery when the router hands out a new one. */
+/** Bulb identity and address supplied by the manager, never a phone-owned list. */
 data class Bulb(val mac: String, val ip: String, val room: String)
 
-/** The saved WiZ bulbs, grouped by room, and the commands for them. Lives in App so the 21:00 alarm can use it without the UI. */
-class Lights(private val prefs: Prefs) {
-    val bulbs = MutableStateFlow(load())
-    /** Last state each saved bulb reported, by MAC. A bulb missing here did not answer. */
+/** HTTP-only lighting client. There is deliberately no bulb network transport on Android. */
+class Lights(private val exchange: suspend (String, JSONObject?) -> JSONObject) {
+    constructor(prefs: Prefs) : this({ path, body -> ButlerClient.exchange(prefs.butlerUrl, prefs.butlerToken, path, body) })
+
+    val bulbs = MutableStateFlow<List<Bulb>>(emptyList())
     val pilots = MutableStateFlow<Map<String, Pilot>>(emptyMap())
     val systemConfigs = MutableStateFlow<Map<String, SystemConfig>>(emptyMap())
+    val observationAges = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val config = MutableStateFlow<JSONObject?>(null)
+    val error = MutableStateFlow<String?>(null)
+    val loaded = MutableStateFlow(false)
 
-    suspend fun readSystemConfigs() {
-        systemConfigs.value = eachBulb(bulbs.value) { b -> Wiz.getSystemConfig(b.ip)?.takeIf { it.mac == b.mac } }
-    }
-
-    fun add(mac: String, ip: String, room: String) = store(bulbs.value.filterNot { it.mac == mac } + Bulb(mac, ip, room))
-    fun remove(mac: String) = store(bulbs.value.filterNot { it.mac == mac })
-
-    /** Asks the whole network. Saved bulbs whose IP changed are updated; returns everything that answered (ip -> state). */
-    suspend fun discover(): Map<String, Pilot> {
-        val found = Wiz.discover()
-        val ipByMac = found.entries.associate { (ip, p) -> p.mac to ip }
-        val updated = bulbs.value.map { b -> ipByMac[b.mac]?.let { b.copy(ip = it) } ?: b }
-        if (updated != bulbs.value) store(updated)
-        val saved = updated.map { it.mac }.toSet()
-        pilots.value = pilots.value + found.values.filter { it.mac in saved }.associateBy { it.mac }
-        return found
-    }
-
-    /** Reads the state of every saved bulb. */
-    suspend fun refresh() {
-        pilots.value = eachBulb(bulbs.value) { b -> Wiz.getPilot(b.ip)?.takeIf { it.mac == b.mac } }
-    }
-
-    /** Sets every bulb in the room; a null mode turns them off. Returns how many bulbs answered. */
-    suspend fun setRoom(room: String, mode: LightMode?): Int {
-        check(!prefs.butlerPending) { "Butler settings unconfirmed. Load and Save them before sending commands." }
-        // Serialize manual intent with the scheduler. If the laptop is down,
-        // fail visibly rather than silently send an override it cannot see.
-        if (prefs.butlerEnabled) return ButlerClient.room(prefs, room, mode?.name ?: "OFF").also { refresh() }
-        val json = if (mode == null) Wiz.setStateJson(false) else Wiz.setModeJson(mode)
-        val ok = eachBulb(bulbs.value.filter { it.room == room }) { b -> Wiz.request(b.ip, json) }
-        refresh()
-        return ok.size
-    }
-
-    /** The 21:00 job: bulbs that are on switch to Night, bulbs that are off stay off. Returns how many were switched. */
-    suspend fun nightIfOn(): Int {
-        val states = eachBulb(bulbs.value) { b -> Wiz.getPilot(b.ip)?.takeIf { it.mac == b.mac } }
-        val on = bulbs.value.filter { states[it.mac]?.on == true }
-        val json = Wiz.setModeJson(LightMode.NIGHT)
-        val ok = eachBulb(on) { b -> Wiz.request(b.ip, json) }
-        refresh()
-        return ok.size
-    }
-
-    /** Flashes a bulb twice so you can tell which one it is, then leaves it as it was. */
-    suspend fun blink(ip: String) {
-        val was = Wiz.getPilot(ip)?.on ?: true
-        repeat(2) {
-            Wiz.request(ip, Wiz.setStateJson(!was), tries = 1); delay(600)
-            Wiz.request(ip, Wiz.setStateJson(was), tries = 1); delay(600)
+    /** Only authenticated manager responses may replace these views. No prefs.bulbs bootstrap. */
+    fun acceptStatus(status: JSONObject) {
+        val settings = status.getJSONObject("config")
+        val list = settings.getJSONArray("bulbs")
+        val saved = (0 until list.length()).map { list.getJSONObject(it) }.map {
+            Bulb(it.getString("mac").lowercase(), it.getString("ip"), it.getString("room"))
         }
+        val states = status.getJSONObject("pilots")
+        val systems = status.getJSONObject("systemConfigs")
+        val errors = status.getJSONObject("errors")
+        val observedAt = status.optJSONObject("observedAt") ?: JSONObject()
+        val statusAt = status.optDouble("statusAt", System.currentTimeMillis() / 1000.0)
+        val maximumAge = maxOf(5, settings.optInt("pollSeconds", 1) * 3)
+        observationAges.value = saved.mapNotNull { b ->
+            if (!observedAt.has(b.mac)) null else b.mac to (statusAt - observedAt.getDouble(b.mac)).toInt().coerceAtLeast(0)
+        }.toMap()
+        bulbs.value = saved
+        pilots.value = saved.mapNotNull { b ->
+            states.optJSONObject(b.mac)?.takeIf {
+                it.optString("mac").lowercase() == b.mac && !errors.has(b.mac) && (observationAges.value[b.mac] ?: Int.MAX_VALUE) <= maximumAge
+            }?.let {
+                b.mac to Pilot(b.mac, it.getBoolean("state"), it.optInt("dimming", -1).takeIf { n -> n >= 0 }, it.optInt("temp", -1).takeIf { n -> n > 0 })
+            }
+        }.toMap()
+        systemConfigs.value = saved.mapNotNull { b ->
+            systems.optJSONObject(b.mac)?.takeIf { it.optString("mac").lowercase() == b.mac }?.let {
+                b.mac to SystemConfig(b.mac, it.optString("moduleName"), it.optString("fwVersion"))
+            }
+        }.toMap()
+        config.value = settings
+        val reported = errors.keys().asSequence().map { "…${it.takeLast(4)}: ${errors.getString(it)}" }.toList()
+        val stale = saved.filter { states.has(it.mac) && (observationAges.value[it.mac] ?: Int.MAX_VALUE) > maximumAge }
+            .map { "…${it.mac.takeLast(4)}: manager observation stale / age unknown" }
+        error.value = (reported + stale).takeIf { it.isNotEmpty() }?.joinToString("; ")
+        loaded.value = true
     }
 
-    /** Runs [op] on every bulb at once. Bulbs that do not answer get one more try after a network search, in case their IP changed. */
-    private suspend fun <T : Any> eachBulb(list: List<Bulb>, op: suspend (Bulb) -> T?): Map<String, T> {
-        val done = parallel(list, op)
-        val missing = list.filter { it.mac !in done }
-        if (missing.isEmpty()) return done
-        discover()
-        val moved = bulbs.value.filter { b -> missing.any { it.mac == b.mac && it.ip != b.ip } }
-        return done + parallel(moved, op)
+    fun unavailable(message: String) {
+        loaded.value = false
+        pilots.value = emptyMap()
+        error.value = "Manager unavailable: $message. No direct bulb command was sent."
     }
 
-    private suspend fun <T : Any> parallel(list: List<Bulb>, op: suspend (Bulb) -> T?): Map<String, T> = coroutineScope {
-        list.map { b -> async { op(b)?.let { b.mac to it } } }.awaitAll().filterNotNull().toMap()
+    suspend fun refresh() {
+        try { acceptStatus(exchange("/v1/status", null)) }
+        catch (e: Exception) { unavailable(e.message ?: "Connection failed"); throw e }
     }
 
-    private fun load(): List<Bulb> = runCatching {
-        val arr = JSONArray(prefs.bulbs ?: return emptyList())
-        (0 until arr.length()).map { arr.getJSONObject(it) }.map { Bulb(it.getString("mac"), it.getString("ip"), it.getString("room")) }
-    }.getOrDefault(emptyList())
+    suspend fun add(mac: String, ip: String, room: String) {
+        acceptStatus(exchange("/v1/bulbs/add", JSONObject().put("mac", mac).put("ip", ip).put("room", room)))
+    }
 
-    private fun store(list: List<Bulb>) {
-        bulbs.value = list
-        prefs.bulbs = JSONArray(list.map { JSONObject().put("mac", it.mac).put("ip", it.ip).put("room", it.room) }).toString()
+    suspend fun remove(mac: String) {
+        acceptStatus(exchange("/v1/bulbs/remove", JSONObject().put("mac", mac)))
+    }
+
+    suspend fun discover(): Map<String, Pilot> {
+        val result = exchange("/v1/discover", JSONObject())
+        acceptStatus(result.getJSONObject("status"))
+        val found = result.getJSONArray("discovered")
+        return (0 until found.length()).mapNotNull { index ->
+            val bulb = found.getJSONObject(index)
+            val mac = bulb.getString("mac").lowercase()
+            val p = bulb.getJSONObject("pilot")
+            if (p.getString("mac").lowercase() != mac) null else bulb.getString("ip") to
+                Pilot(mac, p.getBoolean("state"), p.optInt("dimming", -1).takeIf { it >= 0 }, p.optInt("temp", -1).takeIf { it > 0 })
+        }.toMap()
+    }
+
+    suspend fun command(room: String, mode: String): Int {
+        val result = exchange("/v1/room", JSONObject().put("room", room).put("mode", mode))
+        refresh()
+        val ok = result.getInt("answered")
+        check(ok > 0) { result.optJSONObject("errors")?.toString() ?: "No bulbs acknowledged the manager command" }
+        return ok
+    }
+
+    suspend fun setRoom(room: String, mode: LightMode?): Int = command(room, mode?.name ?: "OFF")
+
+    suspend fun blink(mac: String) {
+        acceptStatus(exchange("/v1/bulbs/blink", JSONObject().put("mac", mac)))
     }
 }

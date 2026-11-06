@@ -57,15 +57,11 @@ class Prefs(ctx: Context) {
         get() = (sp.getString("web_shortcuts", null) ?: "Stremio|https://web.stremio.com")
             .split("\n").filter { it.contains("|") }.map { it.substringBefore("|") to it.substringAfter("|") }
         set(v) = sp.edit().putString("web_shortcuts", v.joinToString("\n") { "${it.first}|${it.second}" }).apply()
-    /** JSON array of saved WiZ bulbs: {mac, ip, room}. */
+    /** Legacy phone bulbs, retained for reference only; never uploaded automatically. */
     var bulbs: String?
         get() = sp.getString("bulbs", null)
         set(v) = sp.edit().putString("bulbs", v).apply()
-    /** At 21:00 switch the bulbs that are on to Night. */
-    var autoNight: Boolean
-        get() = sp.getBoolean("auto_night", true)
-        set(v) = sp.edit().putBoolean("auto_night", v).apply()
-    /** Opt-in laptop fallback. Pending transactions also suspend the phone alarm. */
+    /** Last manager-reported timetable state; disabling never enables phone control. */
     var butlerEnabled: Boolean
         get() = sp.getBoolean("butler_enabled", false)
         set(v) = sp.edit().putBoolean("butler_enabled", v).apply()

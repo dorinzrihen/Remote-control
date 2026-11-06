@@ -1,172 +1,136 @@
-# Optional laptop timetable
+# WiZ lighting manager
 
-This is a **fallback**, not native WiZ Rhythms. See the
-[actual-bulb investigation](../docs/wiz-rhythms.md) first. Nothing is installed,
-started or enabled automatically. Requires Python 3.11+ and system timezone data.
+The manager is the **sole bulb owner**: discovery, reads, identification flashes,
+room commands and automatic scheduling run here. Android uses authenticated HTTP
+only, never direct WiZ UDP. This is **not native WiZ Rhythms**; see the
+[hardware investigation](../docs/wiz-rhythms.md). Requires Python 3.11+ and system
+timezone data. Keep the computer awake and connected to the bulb LAN.
 
-## Start on the always-on laptop
+## Connect and configure
 
-1. Copy this repository (or just `butler/wiz_butler.py`) to the laptop. Reserve a
-   stable LAN IP for the laptop. Keep it awake and connected to the bulb LAN.
+1. Copy `butler/` to the computer and reserve a stable LAN address.
 2. Generate a secret: `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`.
-   Set that value as `UNIREMOTE_TOKEN` in the laptop's environment. Do not commit it.
-3. Start in the foreground, substituting the **laptop's** LAN IP and broadcast:
+   Set it as `UNIREMOTE_TOKEN`; do not commit it.
+3. Start with the computer's LAN IP and broadcast, for example:
 
    ```sh
    python3 butler/wiz_butler.py --listen 192.168.1.10 --broadcast 192.168.1.255
    ```
 
-   Defaults: loopback-only listen, port `8788`, timetable disabled, no bulbs.
-   LAN binding is deliberate; do not bind/expose it on the public internet.
-   HTTP carries the bearer token in cleartext: use only a trusted, isolated home
-   LAN, or put the loopback listener behind an HTTPS reverse proxy. The Android
-   client accepts HTTPS with a normally trusted certificate. No port forwarding.
-   Limit the firewall to the phone/home subnet. WiZ UDP itself is unauthenticated.
+   Defaults: loopback listener, port `8788`, timetable disabled, no bulbs.
+   Do not expose the service publicly or forward its port. HTTP sends the bearer
+   token in cleartext: use a trusted, isolated home LAN, or an HTTPS reverse proxy
+   with a normally trusted certificate. Limit the firewall to the phone/home
+   subnet. WiZ UDP itself is unauthenticated.
+4. In Android, open **Quick actions → Bulbs → Lighting manager**, enter the URL
+   (for example `http://192.168.1.10:8788`) and token, then **Load**. This adopts
+   the manager's bulbs/settings without changing any lights. Old phone-saved bulbs
+   are **not** imported automatically.
+5. Use **Find new bulbs → Blink → room → Add** to register bulbs explicitly.
+   Hold **Remove** to delete one from the manager; removal does not turn it off.
+   These operations work with the timetable enabled or disabled.
+6. Choose Night/Day times, home IANA timezone and polling interval, then **Save**.
+   **Enable manager timetable** changes only automatic scheduling, not the
+   connection or ownership. Manual commands/status still require the manager
+   when the timetable is off. Save preserves bulbs and manual holds and sends no
+   light command. After an unconfirmed Save, Load status before retrying.
 
-4. Build/install the updated Android app. **Quick actions → Bulbs → Laptop
-   timetable**: enter `http://192.168.1.10:8788` and the token, then **Load**.
-   Choose Night/Day times, polling interval, the **home** IANA timezone, and toggle **Use laptop
-   timetable**. **Save** uploads the remote's saved bulb list and settings to
-   the laptop, not to bulb firmware. All timetable controls stay in this remote.
-5. Use the supervised acceptance checklist below before leaving it running.
-   Once satisfied, an optional user service template is provided; edit paths/IPs
-   before installing it. This repository never runs `systemctl` for you.
+State is atomically saved at `~/.local/state/uniremote-wiz/state.json` (0600),
+including bulb identities, timetable and manual holds. Updating the existing Mac
+manager with the same state path preserves its old configuration and holds; no
+phone list upload or migration is needed. Run one manager per home/state file.
+Older Android apps and other controllers can bypass its bookkeeping.
 
-State is atomically saved at `~/.local/state/uniremote-wiz/state.json` (0600).
-It contains the timetable, bulb identities and manual holds, not a backup of
-native bulb configuration. Run only one service instance per state file/home.
-Use one controller phone; another old app version can issue uncoordinated UDP
-commands. Disabling or killing the laptop does not rewrite native configuration.
+## Behavior and limitations
 
-## Behavior
+- Defaults: Night **21:00–06:00**, **20%, 2700K**; Regular **100%, 6500K**.
+  Times (including minutes) and home timezone are editable. Daylight saving uses
+  that timezone; ambiguous boundaries fire once and spring gaps normalize forward.
+- Saved bulbs are polled even when scheduling is disabled. Default interval is
+  **1 second**, editable **1–300 seconds**, including query time; timeouts can
+  overrun it. Timetable boundaries wake the loop sooner. IP rediscovery runs
+  every minute; new bulbs still require explicit Add.
+- When enabled, each Night/Day boundary or detected off/unreachable → on event
+  applies the current preset to on, unheld bulbs. Off/unreachable bulbs are skipped.
+  Startup, adding a bulb and settings Save establish a baseline, not a preset
+  write. An already-on bulb may wait for a later On event, boundary or Follow.
+- **On/Off/Regular/Night** (including the on/off toggle) persist manual holds until
+  the **next timetable boundary**, surviving restart. **On** selects the current
+  home-time preset and **also creates a hold**; it does not resume automatic mode.
+  Only **Follow timetable** (`AUTO`) explicitly clears a hold, applies the current
+  preset to on bulbs and leaves off bulbs off. It requires an enabled timetable.
+  Observed external colour/brightness changes while already on also create holds
+  when scheduling is enabled.
+- Every write checks the bulb's MAC at its current IP. Blink is serialized with
+  scheduling, preserves holds and attempts to restore the original power/preset;
+  a failed restore is reported for inspection. Disabling scheduling is not needed
+  for discovery, adding, removal or Blink.
+- Manager outages fail visibly: **no UDP fallback and no phone evening alarm**.
+  The old Android receiver only cancels leftover alarms on upgrade/startup; it
+  never schedules or controls lights.
+- Wall power restoration must include boot/Wi-Fi reconnection before correction.
+  A network outage looks like power loss; fast off/on cycles between polls and
+  changes during fades can be missed. There is no guaranteed wall-On latency.
+- Live tests found that even `setState` without `state:true` can turn an off bulb
+  on. Automatic writes use guarded `setPilot` with a fresh on-state check, but
+  another controller can still race the read/write pair. Avoid competing native
+  Rhythms or automation: no safe native timetable readback/disable was established.
+  Unknown native/cloud configuration is preserved.
 
-- Defaults (not fixed times): Night **21:00–06:00**, **20%, 2700K**; Regular **100%, 6500K**.
-  Both times, including minutes, and home timezone are editable in the remote.
-  For example, setting **22:15 / 07:45** means 21:00 does nothing. Settings are
-  persisted on the laptop and cached on the phone, then reloaded when you open
-  the settings. Daylight saving is handled
-  in that timezone; ambiguous boundary times fire once, spring gaps normalize
-  forward. Prefer the default hours, away from DST transition hours.
-- Polls saved bulbs at the configured interval: **1 second by default**, editable
-  from **1–300 seconds**. Query time counts toward the interval rather than
-  adding another full delay afterward; long timeouts can still overrun it.
-  Saving settings wakes the polling
-  loop immediately; timetable boundaries wake it earlier than the interval.
-  It does not continuously force a preset. Rediscovers IPs
-  every minute. A MAC-matched read is required before a write. Bulbs observed
-  off or unreachable are skipped; see the independent-controller race below.
-- At either timetable boundary, bulbs already on receive that period's preset.
-  This adds a **Day-start transition** (default 06:00), unlike the original phone's evening-only job.
-- On a detected off/unreachable → on transition, apply the time-appropriate preset.
-  A wall-powered bulb must reconnect to Wi-Fi before this can happen, so the old
-  preset can be visible briefly. The earlier 30-second estimate included bulb
-  boot/Wi-Fi reconnection, not a 30-second software timer. Once reachable, a
-  single healthy bulb is normally corrected within one polling cycle; this
-  cannot guarantee three seconds measured from restoring wall power.
-  This is not as immediate/reliable as native
-  firmware scheduling.
-- Automatic updates recheck that the bulb is on immediately before sending a
-  preset. **Live testing found that `setState` also turns this firmware on**,
-  even without `state:true`; it is not an atomic "only if on" operation. The
-  manager uses guarded `setPilot` writes instead. Commands through its API are
-  serialized, but another independent controller can still race the UDP
-  read/write pair. WiZ provides no tested compare-and-set operation here.
-- **Regular/Night/Off** buttons are serialized through the laptop and persist a
-  manual hold until the **next timetable boundary**. They are not fought by each
-  poll. Manual temperature/brightness changes observed from another controller
-  while already on also create a hold. Holds survive daemon restart.
-- **On** uses the laptop's home-time preset and rejoins the timetable.
-  **Follow timetable** clears a hold and applies the current preset only to on
-  bulbs; it leaves off bulbs off.
-- Startup/settings Save establishes a baseline without changing existing lights.
-  A bulb already on when the daemon starts is not corrected until a detected
-  On, the next boundary, or Follow timetable. This preserves unknown overrides.
-- Phone evening alarms are suspended while the fallback is selected. Manual
-  commands fail visibly when the laptop is down; they do **not** silently fall
-  back to UDP and bypass override bookkeeping. If Save loses its HTTP reply,
-  the phone suspends its alarm/commands until **Load and Save** confirms state.
-- Disable and Save before adding/removing/blinking bulbs or changing laptops.
-  This prevents stale bulb lists or identification flashes being treated as On.
-  Turning the fallback off restores original direct-UDP controls and the phone
-  alarm preference. If the laptop is permanently lost, stop its service first;
-  recover its connection/state or clear the app's fallback preferences only
-  after ensuring no old scheduler can resume.
+## HTTP contract
 
-### Polling limitations
+All endpoints require `Authorization: Bearer <token>`; POST bodies are JSON.
 
-A network loss looks like power loss. Reconnection without a persisted manual
-hold may reapply the timetable once. Fast off/on cycles entirely between polls
-can be missed, and external changes during a fade/startup blind interval can be
-missed too. There is no guaranteed way to distinguish them using `getPilot`.
-For reliable manual holds, use this updated remote. Native Rhythms already
-configured on bulbs, or other automation, may compete: there is no known safe
-native-timetable readback/disable operation here, so do not deploy competing
-schedulers. Unknown cloud configuration is preserved, not overwritten.
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/status`, `GET /v1/config` | Same cached manager status; no direct bulb query per GET |
+| `POST /v1/config` | Timetable only: `enabled`, `night`, `morning`, `timezone`, `pollSeconds` |
+| `POST /v1/discover` | `{}`; returns `discovered` observations and `status`; does not add bulbs |
+| `POST /v1/bulbs/add` | `{mac, ip, room}`; verifies identity and persists the bulb |
+| `POST /v1/bulbs/remove` | `{mac}`; removes the saved bulb/hold, without a light command |
+| `POST /v1/bulbs/blink` | `{mac}`; identifies a saved or manager-discovered bulb |
+| `POST /v1/room` | `{room, mode}`; `REGULAR`, `NIGHT`, `OFF`, `ON`, `TOGGLE` or `AUTO` |
 
-## Supervised acceptance checklist
+Status includes `config` (with manager-owned `bulbs`), MAC-keyed `pilots`,
+`systemConfigs` (read-only hardware/firmware), `observedAt` (last successful read,
+Unix seconds), `errors`, `holds`, plus `lastPoll`, `statusAt` and `native:false`.
+An unreachable/MAC-mismatched bulb loses its current pilot, but retains its last
+successful observation time. Android rejects mismatched/error pilots and ages
+over `max(5, pollSeconds × 3)` seconds; unknown/stale is **not** reported as off.
+If HTTP fails, Android clears current pilots and reports the manager unavailable.
+POST config never replaces bulbs: a differing `bulbs` list is rejected; even an
+old client's identical list is not adopted. Add/remove use the dedicated endpoints.
 
-Live checks are recorded in `docs/wiz-rhythms.md`. During supervised tests,
-both presets were capped at **10–20%** in the test processes only; production Regular
-remains the requested 100%. Do not leave a bright test preset on while waiting
-for a timetable boundary.
+## Service and upgrade
 
-1. Read hardware/firmware for **every bulb** in the remote; inventory unreachable
-   bulbs after restoring wall power. Save a read-only snapshot with `wiz_inspect.py`.
-2. Confirm the service starts disabled and Save itself changes no lights.
-3. Verify that automatic scheduling and Follow timetable skip a bulb already
-   off. Do not assume `setState` is safe: the tested bulb turns on with it.
-4. Use temporary timetable boundaries a few minutes apart. Verify both presets,
-   off bulbs staying off, and a wall On after a fully observed power outage.
-5. Press Regular during Night; verify repeated polls preserve it. Restart the
-   daemon, verify the hold remains. Use Follow timetable; then verify hold expiry
-   at the next boundary. Off must remain off at all boundaries.
-6. Verify DHCP rediscovery, laptop outage messages, token rejection, and disabling
-   the laptop timetable before restoring the phone alarm.
-7. Restore your desired timetable. Do not leave short test boundaries set.
-
-## Tests
+For macOS, create `~/.config/uniremote-wiz.env` from
+`uniremote-wiz.env.example` (0600), setting the token, LAN IP/broadcast and absolute
+Python 3.11+ path. First run `sh /absolute/path/to/butler/run-butler.sh` in a terminal.
+Edit every `/Users/YOU/...` path in `com.uniremote.wiz.plist.example`, then copy it
+to `~/Library/LaunchAgents/com.uniremote.wiz.plist`:
 
 ```sh
-cd butler
-python3 -m unittest -v
+launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.uniremote.wiz.plist"
+# Stop before updating Python files, then bootstrap again:
+launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.uniremote.wiz.plist"
 ```
 
-Tests use fake bulbs and loopback HTTP; they send no packets to physical bulbs.
+This is a **login-only** user agent; paths must be absolute. Keep the Mac awake.
+Boot-before-login and lid/sleep changes are outside this setup. Linux user-service
+templates are also provided (`uniremote-wiz.service.example` and the env example).
+Nothing in this repository installs services automatically.
 
-## Optional user service (edit first)
+Before changing manager URLs, disable and Save the old manager's timetable, then
+stop it. To move its state, copy `~/.local/state/uniremote-wiz/` while both managers
+are stopped; never leave two schedulers running. A fresh state file starts disabled;
+an upgrade reuses the stored enabled setting.
 
-See `uniremote-wiz.service.example` and `uniremote-wiz.env.example`. Store the
-real environment file outside the repo with permissions `0600`. The service
-does not need root. Ensure the laptop does not suspend; a logged-out user service
-requires the usual OS-specific user-service/lifecycle setup.
+## Validation
 
-## Migrate to the macOS butler
-
-Copy the `butler/` directory; no Linux-only Python dependency is required. Use a
-Python **3.11+** interpreter (macOS's bundled Python may be too old). The manager
-uses the standard library, including the OS's IANA timezone database.
-
-1. Create `~/.config/uniremote-wiz.env` from `uniremote-wiz.env.example`, permissions
-   `0600`. Set its token, Mac LAN IP/broadcast and absolute Python interpreter path.
-2. Run `sh /absolute/path/to/butler/run-butler.sh` in a terminal and complete the
-   acceptance checklist. The manager is disabled until configured from the remote.
-3. Optional: edit **all** `/Users/YOU/...` paths in `com.uniremote.wiz.plist.example`,
-   copy it to `~/Library/LaunchAgents/com.uniremote.wiz.plist`, then load it:
-
-   ```sh
-   launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.uniremote.wiz.plist"
-   ```
-
-   To stop it:
-
-   ```sh
-   launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.uniremote.wiz.plist"
-   ```
-
-   Launchd does not expand `~` in plist paths; use absolute paths. This user agent
-   runs while that user is logged in. Keep the Mac awake and on the bulb network.
-
-Disable and Save the old manager from the remote **before** changing its URL to
-the Mac. Then configure/save on the Mac. Do not leave both schedulers running.
-If migrating existing settings, copy the old `~/.local/state/uniremote-wiz/`
-directory while both processes are stopped; the state file includes manual holds.
+Run `python3 -m unittest -v` from `butler/`. Tests use fake bulbs and loopback HTTP,
+not hardware. Before unattended use, supervise: both boundaries, off bulbs staying
+off, wall-power recovery, manual On/preset holds across restart, Follow, discovery/
+Blink/add/remove, wrong-token rejection, stale observations and manager outage.
+Use dim test presets and restore the desired timetable afterward. Earlier hardware
+tests exercised the compatible scheduling core, **not the complete manager-only
+Android release on a phone**; see [validation scope](../docs/wiz-rhythms.md#implementation-and-validation-scope).
