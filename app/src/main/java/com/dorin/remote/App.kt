@@ -13,6 +13,7 @@ class App : Application() {
     lateinit var atv: AtvClient
     lateinit var samsung: SamsungClient
     lateinit var lights: Lights
+    lateinit var tv: TvControl
 
     override fun onCreate() {
         super.onCreate()
@@ -23,6 +24,7 @@ class App : Application() {
         atv = AtvClient(this)
         samsung = SamsungClient(this) { token -> prefs.samsungToken = token }
         lights = Lights(prefs)
+        tv = TvControl(this)
     }
 
     companion object {
