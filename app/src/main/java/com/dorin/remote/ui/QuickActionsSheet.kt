@@ -85,11 +85,6 @@ fun QuickActionsSheet(vm: RemoteViewModel, onDismiss: () -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Quick actions", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold)
 
-            // ---- WiZ bulbs ----
-            PillButton("Bulbs", modifier = Modifier.fillMaxWidth(), color = BulbOn, contentColor = Bg) {
-                onDismiss(); vm.showBulbs.value = true
-            }
-
             if (hasLg) {
             // ---- Sound (TV + LG soundbar over eARC) ----
             Text("Sound output" + (soundOutput?.let { "  ·  ${label(SOUND_OUTPUTS, it)}" } ?: ""), color = TextDim, fontSize = 13.sp)

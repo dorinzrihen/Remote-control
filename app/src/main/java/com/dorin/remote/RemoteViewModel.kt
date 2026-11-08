@@ -112,7 +112,8 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val voiceText = MutableStateFlow<String?>(null)
     // WiZ bulbs
     val lights = application.lights
-    val showBulbs = MutableStateFlow(false)
+    /** The Bulbs tab replaces the remote. Separate from [target], so TV commands never see it; not persisted, like the TV tab. */
+    val bulbsTab = MutableStateFlow(false)
     val butlerEnabled = MutableStateFlow(prefs.butlerEnabled)
     val butlerBusy = MutableStateFlow(false)
     val butlerSettings = MutableStateFlow<org.json.JSONObject?>(null)

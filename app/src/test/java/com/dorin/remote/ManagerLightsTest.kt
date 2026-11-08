@@ -496,8 +496,8 @@ class ManagerLightsTest {
         assertFalse(manifest.contains("EXACT_ALARM"))
         assertFalse(manifest.contains("BOOT_COMPLETED"))
         assertTrue(manifest.contains("MY_PACKAGE_REPLACED"))
-        val sheet = File(main, "java/com/dorin/remote/ui/BulbsSheet.kt").readText()
-        assertTrue(sheet.contains("delay(1_000)"))
-        assertFalse(sheet.contains("autoNight"))
+        val pane = File(main, "java/com/dorin/remote/ui/BulbsPane.kt").readText()
+        assertTrue(pane.contains("delay(1_000)"))
+        assertFalse(pane.contains("autoNight"))
     }
 }

@@ -164,16 +164,19 @@ def main():
         raise RuntimeError(f"Could not scroll to {label!r}")
 
     def scroll_top():
+        # "Bulbs" is both the tab label and the pane title; the title is the top.
+        def at_top():
+            return sum(node.get("text") == "Bulbs" for node in hierarchy().iter("node")) >= 2
         for _ in range(4):
-            if find(hierarchy(), "Bulbs") is not None:
+            if at_top():
                 return
             scroll(up=True)
-        wait_for("Bulbs")
+        if not at_top():
+            raise RuntimeError("Could not scroll to the top of the Bulbs tab")
 
     def open_bulbs():
         adb("shell", "am", "start", "-n", PACKAGE + "/com.dorin.remote.ui.MainActivity")
         tap("Done")
-        tap("Quick actions")
         tap("Bulbs")
 
     def screenshot(name):
@@ -201,12 +204,6 @@ def main():
             adb("shell", "run-as", PACKAGE, "sh", "-c", "'mkdir -p shared_prefs; cat > shared_prefs/uniremote.xml'", data=fixture_preferences())
             open_bulbs()
             wait_for("Living room")
-            # Content arrives after the sheet opens; drag only its handle to
-            # settle the expanded anchor, never swipe/tap a light-control pill.
-            _tree, handle = wait_for("Drag handle")
-            x1, y1, x2, y2 = map(int, re.findall(r"\d+", handle.get("bounds")))
-            adb("shell", "input", "swipe", str((x1 + x2) // 2), str((y1 + y2) // 2),
-                str((x1 + x2) // 2), "100", "400")
             tree, _node = wait_for("Connected · 2 bulbs")
             assert find(tree, "Living room") is not None
             assert find(tree, "Bedroom") is not None
@@ -214,9 +211,11 @@ def main():
             assert find(tree, "Save timetable") is None
             screenshot("bulbs-connected.png")
             tap("Edit timetable")
-            wait_for("Night HH:MM")
+            # Inline in the tab, the fields can open below the visible area.
+            scroll_to("Night HH:MM")
             screenshot("bulbs-timetable.png")
             if args.fixtures_only:
+                scroll_to("Hide timetable")
                 tap("Hide timetable")
                 scroll_top()
                 for mode, label, choice in (("regular", "Regular", "Regular"), ("night", "Night", "Night"),

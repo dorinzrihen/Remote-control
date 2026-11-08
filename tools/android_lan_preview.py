@@ -93,7 +93,6 @@ def main():
     adb("shell", "wm", "dismiss-keyguard")
     adb("shell", "am", "start", "-n", PACKAGE + "/com.dorin.remote.ui.MainActivity")
     tap("Done")
-    tap("Quick actions")
     tap("Bulbs")
     tree, _ = wait_for("Advanced connection")
     assert find(tree, "Manager URL") is None

@@ -20,7 +20,7 @@ timezone data. Keep the computer awake and connected to the bulb LAN.
    can control lights and schedules. No password, token, code or approval is
    required. Do not expose it publicly or forward its port. The deployed Mac stays
    bound to `10.100.102.19:8788`; no firewall or Tailscale route is added.
-3. In the updated Android app, open **Quick actions → Bulbs** on the same Wi-Fi.
+3. In the updated Android app, open the **Bulbs** tab on the same Wi-Fi.
    A sole macOS manager is discovered with Bonjour and connected automatically,
    including on a fresh install with no saved settings. If multiple managers are
    found, choose one by name. **Advanced connection** offers only an optional

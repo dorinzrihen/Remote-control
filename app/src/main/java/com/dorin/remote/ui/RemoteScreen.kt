@@ -75,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.content.Intent
 import android.speech.RecognizerIntent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.dorin.remote.Key
@@ -94,6 +95,7 @@ fun RemoteScreen(vm: RemoteViewModel) {
     val atvState by vm.atv.state.collectAsState()
     val samsungState by vm.samsung.state.collectAsState()
     val targets by vm.targets.collectAsState()
+    val bulbsTab by vm.bulbsTab.collectAsState()
     val keyboardOpen by vm.keyboardOpen.collectAsState()
     val speed by vm.pointerSpeed.collectAsState()
     val inputs by vm.lg.inputs.collectAsState()
@@ -145,142 +147,147 @@ fun RemoteScreen(vm: RemoteViewModel) {
             Spacer(Modifier.height(8.dp))
         }
 
-        // Target switch
+        // Target switch, plus Bulbs (not a TV target: it only swaps the screen body)
         Row(Modifier.fillMaxWidth().background(Surface1, RoundedCornerShape(14.dp)).padding(4.dp)) {
             targets.forEach { t ->
-                TargetTab(t.label, target == t, t.accent(), Modifier.weight(1f)) {
+                TargetTab(t.label, !bulbsTab && target == t, t.accent(), Modifier.weight(1f)) {
+                    vm.bulbsTab.value = false
                     if (t == Target.ATV) vm.goToXiaomi() else vm.target.value = t
                 }
             }
+            TargetTab("Bulbs", bulbsTab, BulbOn, Modifier.weight(1f)) { vm.bulbsTab.value = true }
         }
         Spacer(Modifier.height(8.dp))
 
-        // Voice: phone speech recognition -> keyboard bar
-        val ctx = androidx.compose.ui.platform.LocalContext.current
-        val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-            val text = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-            if (!text.isNullOrBlank()) vm.onVoiceResult(text)
-        }
-        fun startVoice() {
-            val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                .putExtra(RecognizerIntent.EXTRA_PROMPT, "Say what to type or search")
-            try { voice.launch(i) } catch (e: Exception) { vm.messages.tryEmit("No speech recognition on this phone") }
-        }
+        if (bulbsTab) {
+            BackHandler { vm.bulbsTab.value = false }
+            BulbsPane(vm, Modifier.weight(1f))
+        } else {
+            // Voice: phone speech recognition -> keyboard bar
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+                val text = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+                if (!text.isNullOrBlank()) vm.onVoiceResult(text)
+            }
+            fun startVoice() {
+                val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    .putExtra(RecognizerIntent.EXTRA_PROMPT, "Say what to type or search")
+                try { voice.launch(i) } catch (e: Exception) { vm.messages.tryEmit("No speech recognition on this phone") }
+            }
 
-        // Power / input / keyboard row
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            RemoteButton(icon = Icons.Default.PowerSettingsNew, label = "TV power", size = 46.dp, contentColor = Danger) { vm.tvPower() }
-            if (Target.ATV in targets) RemoteButton(icon = Icons.Default.Tv, label = "Xiaomi power", size = 46.dp, contentColor = AccentAtv) { vm.atvPower() }
-            Box {
-                var open by remember { mutableStateOf(false) }
-                RemoteButton(icon = Icons.Default.Input, label = "Input", size = 46.dp) { open = true }
-                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                    if (tvIsSamsung) {
-                        DropdownMenuItem(text = { Text("Source menu") }, onClick = { open = false; vm.switchSamsungInput("KEY_SOURCE") })
-                        DropdownMenuItem(text = { Text("TV") }, onClick = { open = false; vm.switchSamsungInput("KEY_TV") })
-                        SAMSUNG_HDMI_KEYS.forEach { (key, label) ->
-                            DropdownMenuItem(text = { Text(label) }, onClick = { open = false; vm.switchSamsungInput(key) })
-                        }
-                    } else {
-                        if (inputs.isEmpty()) DropdownMenuItem(text = { Text("Connect to LG TV first") }, onClick = { open = false })
-                        inputs.forEach { i ->
-                            DropdownMenuItem(text = { Text(i.label.ifEmpty { i.id }) }, onClick = { open = false; vm.switchLgInput(i.id) })
+            // Power / input / keyboard row
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                RemoteButton(icon = Icons.Default.PowerSettingsNew, label = "TV power", size = 46.dp, contentColor = Danger) { vm.tvPower() }
+                if (Target.ATV in targets) RemoteButton(icon = Icons.Default.Tv, label = "Xiaomi power", size = 46.dp, contentColor = AccentAtv) { vm.atvPower() }
+                Box {
+                    var open by remember { mutableStateOf(false) }
+                    RemoteButton(icon = Icons.Default.Input, label = "Input", size = 46.dp) { open = true }
+                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                        if (tvIsSamsung) {
+                            DropdownMenuItem(text = { Text("Source menu") }, onClick = { open = false; vm.switchSamsungInput("KEY_SOURCE") })
+                            DropdownMenuItem(text = { Text("TV") }, onClick = { open = false; vm.switchSamsungInput("KEY_TV") })
+                            SAMSUNG_HDMI_KEYS.forEach { (key, label) ->
+                                DropdownMenuItem(text = { Text(label) }, onClick = { open = false; vm.switchSamsungInput(key) })
+                            }
+                        } else {
+                            if (inputs.isEmpty()) DropdownMenuItem(text = { Text("Connect to LG TV first") }, onClick = { open = false })
+                            inputs.forEach { i ->
+                                DropdownMenuItem(text = { Text(i.label.ifEmpty { i.id }) }, onClick = { open = false; vm.switchLgInput(i.id) })
+                            }
                         }
                     }
                 }
-            }
-            RemoteButton(icon = Icons.Default.Keyboard, label = "Keyboard", size = 46.dp, color = if (keyboardOpen) accent else Surface2, contentColor = if (keyboardOpen) Bg else TextMain) {
-                vm.keyboardOpen.value = !keyboardOpen
-            }
-            RemoteButton(icon = Icons.Default.Mic, label = "Voice", size = 46.dp) { startVoice() }
-            RemoteButton(icon = Icons.Default.Bolt, label = "Quick actions", size = 46.dp, contentColor = Color(0xFFE0AF68)) { vm.showQuick.value = true }
-        }
-        Spacer(Modifier.height(8.dp))
-
-        // Touchpad
-        Touchpad(
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            target = target,
-            speed = speed,
-            onMove = vm::pointerMove,
-            onClick = vm::pointerClick,
-            onScroll = vm::pointerScroll,
-            onDpad = { dx, dy ->
-                when {
-                    dx > 0 -> vm.press(Key.RIGHT); dx < 0 -> vm.press(Key.LEFT)
-                    dy > 0 -> vm.press(Key.DOWN); dy < 0 -> vm.press(Key.UP)
+                RemoteButton(icon = Icons.Default.Keyboard, label = "Keyboard", size = 46.dp, color = if (keyboardOpen) accent else Surface2, contentColor = if (keyboardOpen) Bg else TextMain) {
+                    vm.keyboardOpen.value = !keyboardOpen
                 }
-            },
-        )
-        Spacer(Modifier.height(8.dp))
-
-        if (keyboardOpen) {
-            KeyboardBar(vm, accent, target)
+                RemoteButton(icon = Icons.Default.Mic, label = "Voice", size = 46.dp) { startVoice() }
+                RemoteButton(icon = Icons.Default.Bolt, label = "Quick actions", size = 46.dp, contentColor = Color(0xFFE0AF68)) { vm.showQuick.value = true }
+            }
             Spacer(Modifier.height(8.dp))
-        }
 
-        // D-pad with back/home on the sides
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                RemoteButton(icon = Icons.AutoMirrored.Filled.ArrowBack, label = "Back", size = 52.dp) { vm.press(Key.BACK) }
-                RemoteButton(icon = Icons.Default.Menu, label = "Menu", size = 52.dp) { vm.press(Key.MENU) }
+            // Touchpad
+            Touchpad(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                target = target,
+                speed = speed,
+                onMove = vm::pointerMove,
+                onClick = vm::pointerClick,
+                onScroll = vm::pointerScroll,
+                onDpad = { dx, dy ->
+                    when {
+                        dx > 0 -> vm.press(Key.RIGHT); dx < 0 -> vm.press(Key.LEFT)
+                        dy > 0 -> vm.press(Key.DOWN); dy < 0 -> vm.press(Key.UP)
+                    }
+                },
+            )
+            Spacer(Modifier.height(8.dp))
+
+            if (keyboardOpen) {
+                KeyboardBar(vm, accent, target)
+                Spacer(Modifier.height(8.dp))
             }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                RemoteButton(icon = Icons.Default.KeyboardArrowUp, label = "Up", size = 54.dp, repeat = true) { vm.press(Key.UP) }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    RemoteButton(icon = Icons.Default.KeyboardArrowLeft, label = "Left", size = 54.dp, repeat = true) { vm.press(Key.LEFT) }
-                    Spacer(Modifier.width(6.dp))
-                    RemoteButton(label = "OK", size = 64.dp, color = accent, contentColor = Bg, labelSize = 16) { vm.press(Key.OK) }
-                    Spacer(Modifier.width(6.dp))
-                    RemoteButton(icon = Icons.Default.KeyboardArrowRight, label = "Right", size = 54.dp, repeat = true) { vm.press(Key.RIGHT) }
+
+            // D-pad with back/home on the sides
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    RemoteButton(icon = Icons.AutoMirrored.Filled.ArrowBack, label = "Back", size = 52.dp) { vm.press(Key.BACK) }
+                    RemoteButton(icon = Icons.Default.Menu, label = "Menu", size = 52.dp) { vm.press(Key.MENU) }
                 }
-                RemoteButton(icon = Icons.Default.KeyboardArrowDown, label = "Down", size = 54.dp, repeat = true) { vm.press(Key.DOWN) }
-            }
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                RemoteButton(icon = Icons.Default.Home, label = "Home", size = 52.dp) { vm.press(Key.HOME) }
-                RemoteButton(label = "EXIT", size = 52.dp, labelSize = 11) { vm.press(Key.EXIT) }
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-
-        // Volume + media
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
-            RemoteButton(icon = Icons.Default.Remove, label = "Volume down", size = 50.dp, repeat = true) { vm.press(Key.VOL_DOWN) }
-            RemoteButton(icon = if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp, label = "Mute", size = 44.dp, contentColor = if (muted) Danger else TextMain) { vm.press(Key.MUTE) }
-            RemoteButton(icon = Icons.Default.Add, label = "Volume up", size = 50.dp, repeat = true) { vm.press(Key.VOL_UP) }
-            Spacer(Modifier.width(8.dp))
-            RemoteButton(icon = Icons.Default.FastRewind, label = "Rewind", size = 44.dp) { vm.press(Key.REWIND) }
-            RemoteButton(icon = Icons.Default.PlayArrow, label = "Play", size = 44.dp) { vm.press(Key.PLAY) }
-            RemoteButton(icon = Icons.Default.Pause, label = "Pause", size = 44.dp) { vm.press(Key.PAUSE) }
-            RemoteButton(icon = Icons.Default.FastForward, label = "Forward", size = 44.dp) { vm.press(Key.FAST_FORWARD) }
-        }
-        Spacer(Modifier.height(10.dp))
-
-        // Shortcuts (configured in Settings)
-        val lgShortcutIds by vm.lgShortcutIds.collectAsState()
-        val webShortcuts by vm.webShortcuts.collectAsState()
-        val lgApps by vm.lgApps.collectAsState()
-        val samsungShortcutIds by vm.samsungShortcutIds.collectAsState()
-        val samsungApps by vm.samsungApps.collectAsState()
-        val shortcuts = remember(target, lgShortcutIds, samsungShortcutIds, webShortcuts, lgApps, samsungApps) { vm.shortcutsFor(target) }
-        // Two taps launch: the first one arms the button, so a stray touch does nothing.
-        var armed by remember { mutableStateOf<String?>(null) }
-        LaunchedEffect(armed) { if (armed != null) { delay(2500); armed = null } }
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            shortcuts.forEach { sc ->
-                ShortcutButton(sc, armed = armed == sc.iconKey, accent = accent) {
-                    if (armed == sc.iconKey) { armed = null; vm.launch(sc) } else armed = sc.iconKey
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    RemoteButton(icon = Icons.Default.KeyboardArrowUp, label = "Up", size = 54.dp, repeat = true) { vm.press(Key.UP) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RemoteButton(icon = Icons.Default.KeyboardArrowLeft, label = "Left", size = 54.dp, repeat = true) { vm.press(Key.LEFT) }
+                        Spacer(Modifier.width(6.dp))
+                        RemoteButton(label = "OK", size = 64.dp, color = accent, contentColor = Bg, labelSize = 16) { vm.press(Key.OK) }
+                        Spacer(Modifier.width(6.dp))
+                        RemoteButton(icon = Icons.Default.KeyboardArrowRight, label = "Right", size = 54.dp, repeat = true) { vm.press(Key.RIGHT) }
+                    }
+                    RemoteButton(icon = Icons.Default.KeyboardArrowDown, label = "Down", size = 54.dp, repeat = true) { vm.press(Key.DOWN) }
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    RemoteButton(icon = Icons.Default.Home, label = "Home", size = 52.dp) { vm.press(Key.HOME) }
+                    RemoteButton(label = "EXIT", size = 52.dp, labelSize = 11) { vm.press(Key.EXIT) }
                 }
             }
-            if (shortcuts.isEmpty()) Text("Choose shortcuts in Settings", color = TextDim, fontSize = 12.sp)
+            Spacer(Modifier.height(10.dp))
+
+            // Volume + media
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
+                RemoteButton(icon = Icons.Default.Remove, label = "Volume down", size = 50.dp, repeat = true) { vm.press(Key.VOL_DOWN) }
+                RemoteButton(icon = if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp, label = "Mute", size = 44.dp, contentColor = if (muted) Danger else TextMain) { vm.press(Key.MUTE) }
+                RemoteButton(icon = Icons.Default.Add, label = "Volume up", size = 50.dp, repeat = true) { vm.press(Key.VOL_UP) }
+                Spacer(Modifier.width(8.dp))
+                RemoteButton(icon = Icons.Default.FastRewind, label = "Rewind", size = 44.dp) { vm.press(Key.REWIND) }
+                RemoteButton(icon = Icons.Default.PlayArrow, label = "Play", size = 44.dp) { vm.press(Key.PLAY) }
+                RemoteButton(icon = Icons.Default.Pause, label = "Pause", size = 44.dp) { vm.press(Key.PAUSE) }
+                RemoteButton(icon = Icons.Default.FastForward, label = "Forward", size = 44.dp) { vm.press(Key.FAST_FORWARD) }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            // Shortcuts (configured in Settings)
+            val lgShortcutIds by vm.lgShortcutIds.collectAsState()
+            val webShortcuts by vm.webShortcuts.collectAsState()
+            val lgApps by vm.lgApps.collectAsState()
+            val samsungShortcutIds by vm.samsungShortcutIds.collectAsState()
+            val samsungApps by vm.samsungApps.collectAsState()
+            val shortcuts = remember(target, lgShortcutIds, samsungShortcutIds, webShortcuts, lgApps, samsungApps) { vm.shortcutsFor(target) }
+            // Two taps launch: the first one arms the button, so a stray touch does nothing.
+            var armed by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(armed) { if (armed != null) { delay(2500); armed = null } }
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                shortcuts.forEach { sc ->
+                    ShortcutButton(sc, armed = armed == sc.iconKey, accent = accent) {
+                        if (armed == sc.iconKey) { armed = null; vm.launch(sc) } else armed = sc.iconKey
+                    }
+                }
+                if (shortcuts.isEmpty()) Text("Choose shortcuts in Settings", color = TextDim, fontSize = 12.sp)
+            }
         }
     }
 
     val showQuick by vm.showQuick.collectAsState()
     if (showQuick) QuickActionsSheet(vm) { vm.showQuick.value = false }
-    val showBulbs by vm.showBulbs.collectAsState()
-    if (showBulbs) BulbsSheet(vm) { vm.showBulbs.value = false }
     val showYouTube by vm.showYouTube.collectAsState()
     if (showYouTube) YouTubeSheet(vm) { vm.showYouTube.value = false }
 }

@@ -41,7 +41,7 @@ development, but does not validate a physical phone's multicast/Wi-Fi behavior.
 The older `uniremote-preview` Pixel 7 screenshot-test device is left untouched.
 Do not run fixture/reset screenshot scripts against the everyday device if you
 want to keep its app settings. A fresh app may first show TV setup: choose **Done**,
-then **Quick actions → Bulbs** to review automatic LAN discovery. Emulator testing
+then the **Bulbs** tab to review automatic LAN discovery. Emulator testing
 does not replace physical-phone testing on home Wi-Fi.
 
 ## One-time setup

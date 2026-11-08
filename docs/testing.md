@@ -23,7 +23,7 @@ No production signing key or published release is needed.
 - [ ] Install Preview without replacing the working UniRemote app.
 - [ ] In TV setup, scan for the real TV and check Connect using its normal TV
   approval flow. Emulator discovery alone does not validate phone multicast.
-- [ ] Open **Quick actions → Bulbs**. With one LAN manager, connection should be
+- [ ] Open the **Bulbs** tab. With one LAN manager, connection should be
   automatic with zero entered fields and no lighting authentication.
 - [ ] Check the manager dot: green after a recent successful status response,
   grey while unavailable/checking. A bulb failure is not a manager outage.
