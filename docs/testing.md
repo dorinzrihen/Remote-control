@@ -18,6 +18,18 @@ Preview uses the separate package `com.dorin.uniremote.preview`, installs beside
 UniRemote 1.7 with separate settings, and disables public update prompts.
 No production signing key or published release is needed.
 
+## GUI end-to-end with mock lights
+
+```sh
+just mock-lights scenario --build
+just mock-lights down
+```
+
+Runs the real Preview APK in the disposable `uniremote-preview` emulator against
+the real lighting manager driving simulated bulbs on loopback, checks power,
+Regular/Night, offline and discovery, and saves screenshots to
+`/tmp/uniremote-mock-e2e/`. See [mock lights e2e](mock-e2e.md) for interactive commands.
+
 ## Actual Pixel 8a on home Wi-Fi
 
 - [ ] Install Preview without replacing the working UniRemote app.

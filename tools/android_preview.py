@@ -8,25 +8,18 @@ separate com.dorin.uniremote.preview app on that emulator. No real manager calls
 import argparse
 import json
 from pathlib import Path
-import re
 import shutil
-import subprocess
 import threading
 import time
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PACKAGE = "com.dorin.uniremote.preview"
+from android_ui import Android, PACKAGE, find, preferences, selected_controls  # noqa: F401 (re-exported)
 STATE_SCREENSHOTS = ("bulbs-regular.png", "bulbs-night.png", "bulbs-follow.png")
 
 
 def fixture_preferences():
-    # Active schedule + deliberately different saved service name prevent NSD
-    # from switching to the household manager, even if the fixture goes offline.
-    return b'''<?xml version="1.0" encoding="utf-8"?>
-<map><string name="butler_url">http://127.0.0.1:8789</string>
-<string name="butler_service_name">Preview fixture only - never household</string>
-<boolean name="butler_enabled" value="true" /></map>'''
+    return preferences()
 
 
 def fixture(mode="mixed"):
@@ -57,14 +50,6 @@ def copy_state_screenshots(source, destination):
     destination.mkdir(parents=True, exist_ok=True)
     for name in STATE_SCREENSHOTS:
         shutil.copy2(source / name, destination / name)
-
-
-def selected_controls(tree):
-    # Compose selectable(Role.RadioButton) exports Checked on the parent View,
-    # with its text in a child; it is not Android's legacy Selected attribute.
-    return [child.get("text") for node in tree.iter("node")
-            if node.get("checkable") == "true" and node.get("checked") == "true"
-            for child in node.iter("node") if child.get("text") in ("Regular", "Night", "Follow timetable")]
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -117,81 +102,14 @@ def main():
         parser.error("Use a dedicated emulator, never a physical phone, for fixture capture")
     args.output.mkdir(parents=True, exist_ok=True)
 
-    def adb(*arguments, data=None, timeout=30):
-        return subprocess.run([str(args.adb), "-s", args.serial, *arguments],
-                              input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=timeout, check=True).stdout
-
-    def hierarchy():
-        adb("shell", "uiautomator", "dump", "/sdcard/uniremote-preview.xml")
-        return ET.fromstring(adb("exec-out", "cat", "/sdcard/uniremote-preview.xml"))
-
-    def find(tree, label):
-        return next((node for node in tree.iter("node")
-                     if label in (node.get("text"), node.get("content-desc"))), None)
-
-    def wait_for(label):
-        deadline = time.monotonic() + 25
-        while time.monotonic() < deadline:
-            tree = hierarchy()
-            node = find(tree, label)
-            if node is not None:
-                return tree, node
-            time.sleep(0.3)
-        raise RuntimeError(f"UI never showed {label!r}")
-
-    def tap(label):
-        _tree, node = wait_for(label)
-        x1, y1, x2, y2 = map(int, re.findall(r"\d+", node.get("bounds")))
-        adb("shell", "input", "tap", str((x1 + x2) // 2), str((y1 + y2) // 2))
-
-    size = None
-
-    def scroll(up=False):
-        nonlocal size
-        if size is None:
-            size = tuple(map(int, re.findall(rb"(\d+)x(\d+)", adb("shell", "wm", "size"))[-1]))
-        width, height = size
-        start, end = (0.35, 0.78) if up else (0.78, 0.35)
-        adb("shell", "input", "swipe", str(width // 2), str(int(height * start)),
-            str(width // 2), str(int(height * end)), "350")
-
-    def scroll_to(label):
-        for _ in range(8):
-            if find(hierarchy(), label) is not None:
-                return
-            scroll()
-        raise RuntimeError(f"Could not scroll to {label!r}")
-
-    def scroll_top():
-        # "Bulbs" is both the tab label and the pane title; the title is the top.
-        def at_top():
-            return sum(node.get("text") == "Bulbs" for node in hierarchy().iter("node")) >= 2
-        for _ in range(4):
-            if at_top():
-                return
-            scroll(up=True)
-        if not at_top():
-            raise RuntimeError("Could not scroll to the top of the Bulbs tab")
-
-    def open_bulbs():
-        adb("shell", "am", "start", "-n", PACKAGE + "/com.dorin.remote.ui.MainActivity")
-        tap("Done")
-        tap("Bulbs")
+    android = Android(args.serial, args.adb)
+    adb, hierarchy, wait_for, tap = android.adb, android.hierarchy, android.wait_for, android.tap
+    scroll_to, scroll_top, open_bulbs = android.scroll_to, android.scroll_top, android.open_bulbs
 
     def screenshot(name):
-        image = adb("exec-out", "screencap", "-p")
-        if not image.startswith(b"\x89PNG\r\n\x1a\n"):
-            raise RuntimeError("Emulator did not return a PNG")
-        (args.output / name).write_bytes(image)
+        android.screenshot(args.output / name)
 
-    adb("wait-for-device", timeout=90)
-    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-    adb("shell", "wm", "dismiss-keyguard")
-    for setting in ("window_animation_scale", "transition_animation_scale", "animator_duration_scale"):
-        adb("shell", "settings", "put", "global", setting, "0")
-    adb("install", "-r", str(args.apk.resolve()), timeout=90)
-    adb("shell", "pm", "clear", PACKAGE)
+    android.prepare()
     # Seed before the FIRST Bulbs open: fresh unauthenticated Preview otherwise
     # automatically connects to the real Bonjour manager.
     with ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler) as server:
@@ -200,8 +118,7 @@ def main():
         port = str(server.server_port)
         adb("reverse", "tcp:8789", "tcp:" + port)
         try:
-            adb("shell", "am", "force-stop", PACKAGE)
-            adb("shell", "run-as", PACKAGE, "sh", "-c", "'mkdir -p shared_prefs; cat > shared_prefs/uniremote.xml'", data=fixture_preferences())
+            android.install_fresh(args.apk, fixture_preferences())
             open_bulbs()
             wait_for("Living room")
             tree, _node = wait_for("Connected · 2 bulbs")

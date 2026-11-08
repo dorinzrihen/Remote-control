@@ -51,3 +51,5 @@ See [phone testing and emulator screenshots](docs/testing.md).
 Run `just emulator dev` to build and open Preview on the persistent, visible
 Pixel 8a emulator; rerun to update it without losing settings. Stop it with
 `just emulator stop`. See [setup and platform notes](docs/emulator.md).
+To verify GUI changes against simulated bulbs (never real lights), run
+`just mock-lights scenario --build`; see [mock lights e2e](docs/mock-e2e.md).

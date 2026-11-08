@@ -1049,5 +1049,44 @@ class ButlerTest(unittest.TestCase):
         self.assertFalse(self.butler.config["enabled"])
 
 
+class LoopbackTestModeTest(unittest.TestCase):
+    """--test-loopback-bulbs exists only for tools/mock_lights.py; production is unchanged."""
+
+    def args(self, **values):
+        from argparse import Namespace
+        return Namespace(**({"test_loopback_bulbs": True, "test_bulb_port": 48899, "listen": "127.0.0.1",
+                             "broadcast": "127.0.0.10", "state": "/tmp/mock/state.json"} | values))
+
+    def test_production_rejects_loopback_bulbs_and_test_mode_rejects_lan_bulbs(self):
+        loopback = DEFAULT_CONFIG | {"bulbs": [BULB | {"ip": "127.0.0.11"}]}
+        with self.assertRaises(ValueError):
+            validate_config(loopback)
+        self.assertEqual("127.0.0.11", validate_config(loopback, loopback=True)["bulbs"][0]["ip"])
+        with self.assertRaises(ValueError):
+            validate_config(DEFAULT_CONFIG | {"bulbs": [BULB]}, loopback=True)
+
+    def test_loopback_butler_refuses_a_lan_bulb(self):
+        with tempfile.TemporaryDirectory() as directory:
+            butler = Butler(Path(directory) / "state.json", FakeUdp(), loopback=True)
+            with self.assertRaises(ValueError):
+                butler.add_bulb(BULB)
+            self.assertEqual([], FakeUdp().writes)
+
+    def test_test_mode_options_must_stay_on_loopback_and_isolated_state(self):
+        from wiz_butler import WIZ_PORT, test_mode_error
+        self.assertIsNone(test_mode_error(self.args()))
+        self.assertIn("--listen", test_mode_error(self.args(listen="0.0.0.0")))
+        self.assertIn("--broadcast", test_mode_error(self.args(broadcast="255.255.255.255")))
+        self.assertIn("--broadcast", test_mode_error(self.args(broadcast="192.168.1.255")))
+        self.assertIn("household", test_mode_error(self.args(state="/x/state.json"), default_state=Path("/x/state.json")))
+        self.assertIsNone(test_mode_error(self.args(test_loopback_bulbs=False, test_bulb_port=WIZ_PORT)))
+        self.assertIn("requires", test_mode_error(self.args(test_loopback_bulbs=False)))
+
+    def test_default_udp_still_targets_the_real_wiz_port_and_lan(self):
+        udp = Udp("192.168.1.255")
+        self.assertEqual((38899, False), (udp.port, udp.loopback_only))
+        self.assertTrue(udp.allowed("192.168.1.20"))
+
+
 if __name__ == "__main__":
     unittest.main()

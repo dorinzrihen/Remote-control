@@ -22,13 +22,23 @@ from bonjour import Bonjour
 MODES = {"REGULAR": {"dimming": 100, "temp": 6500}, "NIGHT": {"dimming": 20, "temp": 2700}}
 DEFAULT_CONFIG = {"enabled": False, "night": "21:00", "morning": "06:00", "timezone": "Asia/Jerusalem", "pollSeconds": 1, "bulbs": []}
 TIMETABLE_KEYS = ("enabled", "night", "morning", "timezone", "pollSeconds")
+WIZ_PORT = 38899
 
 
 class ConfigConflict(ValueError):
     pass
 
 
-def validate_config(value):
+def bulb_address_allowed(address, loopback=False):
+    """Production: private LAN unicast only. Test-only loopback mode: 127/8 only."""
+    if loopback:
+        # Simulated bulbs (tools/mock_lights.py). Never a LAN address, so a
+        # mock manager can neither reach nor be configured for real bulbs.
+        return address.is_loopback and not str(address).endswith(".255")
+    return address.is_private and not (address.is_loopback or address.is_multicast or address.is_unspecified or str(address).endswith(".255"))
+
+
+def validate_config(value, loopback=False):
     if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
         raise ValueError("enabled must be a boolean")
     for key in ("night", "morning"):
@@ -54,8 +64,8 @@ def validate_config(value):
         if not isinstance(mac, str) or not re.fullmatch(r"[0-9a-fA-F]{12}", mac) or mac.lower() in seen:
             raise ValueError("Invalid or duplicate MAC")
         address = ipaddress.IPv4Address(ip)
-        if not address.is_private or address.is_loopback or address.is_multicast or address.is_unspecified or str(address).endswith(".255"):
-            raise ValueError("Bulb IP must be a private LAN unicast IPv4 address")
+        if not bulb_address_allowed(address, loopback):
+            raise ValueError("Bulb IP must be a loopback address in test mode" if loopback else "Bulb IP must be a private LAN unicast IPv4 address")
         if not isinstance(room, str) or not room.strip() or len(room) > 100:
             raise ValueError("Invalid room")
         seen.add(mac.lower())
@@ -85,15 +95,25 @@ def schedule(config, now):
 
 
 class Udp:
-    def __init__(self, broadcast):
-        self.broadcast = broadcast
+    def __init__(self, broadcast, port=WIZ_PORT, loopback_only=False):
+        self.broadcast, self.port, self.loopback_only = broadcast, port, loopback_only
+        if loopback_only and not ipaddress.IPv4Address(broadcast).is_loopback:
+            raise ValueError("Loopback test mode requires a loopback discovery address")
+
+    def allowed(self, ip):
+        try:
+            return not self.loopback_only or ipaddress.IPv4Address(ip).is_loopback
+        except ValueError:
+            return False
 
     def request(self, ip, method, params):
+        if not self.allowed(ip):
+            return None  # Test mode: never send a packet off this host.
         ident = secrets.randbelow(2**30)
         packet = json.dumps({"id": ident, "method": method, "params": params}).encode()
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.connect((ip, 38899))
+                sock.connect((ip, self.port))
                 sock.settimeout(0.7)
                 # Reads may be retried; writes are observed next cycle rather
                 # than blindly repeated after an ambiguous acknowledgement.
@@ -117,7 +137,7 @@ class Udp:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.settimeout(0.2)
-            sock.sendto(b'{"method":"getSystemConfig","params":{}}', (self.broadcast, 38899))
+            sock.sendto(b'{"method":"getSystemConfig","params":{}}', (self.broadcast, self.port))
             end = time.monotonic() + 1
             while time.monotonic() < end:
                 try:
@@ -126,7 +146,7 @@ class Udp:
                     if isinstance(reply, dict) and reply.get("method") == "getSystemConfig":
                         result = reply.get("result")
                         mac = result.get("mac") if isinstance(result, dict) else None
-                        if isinstance(mac, str) and re.fullmatch(r"[0-9a-fA-F]{12}", mac):
+                        if isinstance(mac, str) and re.fullmatch(r"[0-9a-fA-F]{12}", mac) and self.allowed(source[0]):
                             found[mac.lower()] = source[0]
                 except (socket.timeout, ValueError, KeyError, TypeError):
                     continue
@@ -134,12 +154,12 @@ class Udp:
 
 
 class Butler:
-    def __init__(self, path, udp):
-        self.path, self.udp = Path(path), udp
+    def __init__(self, path, udp, loopback=False):
+        self.path, self.udp, self.loopback = Path(path), udp, loopback
         self.lock = threading.RLock()
         self.changed = threading.Event()
         stored = json.loads(self.path.read_text()) if self.path.exists() else {}
-        self.config = validate_config(stored.get("config", DEFAULT_CONFIG))
+        self.config = self.validate(stored.get("config", DEFAULT_CONFIG))
         self.holds = stored.get("holds", {})
         self.intents = stored.get("intents", {})
         self.progress_dirty = False
@@ -152,6 +172,9 @@ class Butler:
         self.observed_at = {}
         self.system_configs = {}
         self.discovered = {}
+
+    def validate(self, value):
+        return validate_config(value, self.loopback)
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,14 +194,14 @@ class Butler:
                 expected = value["expectedConfig"]
                 if not isinstance(expected, dict) or set(expected) != set(TIMETABLE_KEYS):
                     raise ValueError("expectedConfig must contain the five timetable fields")
-                expected = validate_config(expected | {"bulbs": []})
+                expected = self.validate(expected | {"bulbs": []})
                 if any(expected[key] != self.config[key] for key in TIMETABLE_KEYS):
                     raise ConfigConflict("Timetable changed on another device. Reload before saving.")
             # Bulbs have dedicated add/remove/rename operations. In particular an old
             # or newly installed phone must never erase this manager's list.
             if "bulbs" in value and value["bulbs"] != self.config["bulbs"]:
                 raise ValueError("Manager owns the bulb list; use bulb add/remove/rename, not config")
-            config = validate_config(value | {"bulbs": self.config["bulbs"]})
+            config = self.validate(value | {"bulbs": self.config["bulbs"]})
             # Preserve holds, observations and known addresses. Saving a
             # timetable is not a lighting action or a discovery reset.
             old_config, old_holds = self.config, dict(self.holds)
@@ -196,7 +219,7 @@ class Butler:
         found = {}
         for mac, ip in self.udp.discover().items():
             try:
-                bulb = validate_config(self.config | {"bulbs": [{"mac": mac, "ip": ip, "room": "Discovered"}]})["bulbs"][0]
+                bulb = self.validate(self.config | {"bulbs": [{"mac": mac, "ip": ip, "room": "Discovered"}]})["bulbs"][0]
             except (ValueError, TypeError):
                 continue
             found[bulb["mac"]] = bulb["ip"]
@@ -220,11 +243,11 @@ class Butler:
 
     def add_bulb(self, value):
         with self.lock:
-            bulb = validate_config(self.config | {"bulbs": [value]})["bulbs"][0]
+            bulb = self.validate(self.config | {"bulbs": [value]})["bulbs"][0]
             if self.pilot(bulb) is None:
                 raise ValueError("Bulb did not answer with the expected MAC; discover again")
             old = self.config
-            self.config = validate_config(self.config | {"bulbs": [b for b in self.config["bulbs"] if b["mac"] != bulb["mac"]] + [bulb]})
+            self.config = self.validate(self.config | {"bulbs": [b for b in self.config["bulbs"] if b["mac"] != bulb["mac"]] + [bulb]})
             try:
                 self.save()
             except OSError:
@@ -258,7 +281,7 @@ class Butler:
             old = self.config
             # Holds and intents are keyed by MAC, so they follow the bulb. Do not
             # set self.changed: waking the poll loop early would be bulb traffic.
-            self.config = validate_config(old | {"bulbs": [b | {"room": room} if b["mac"] == mac else b for b in old["bulbs"]]})
+            self.config = self.validate(old | {"bulbs": [b | {"room": room} if b["mac"] == mac else b for b in old["bulbs"]]})
             try:
                 self.save()
             except OSError:
@@ -567,18 +590,42 @@ def handler(butler):
     return Handler
 
 
+def test_mode_error(args, default_state=None):
+    """Return why test-only options are unsafe, or None. Production defaults are unchanged."""
+    if not args.test_loopback_bulbs:
+        return "--test-bulb-port requires --test-loopback-bulbs" if args.test_bulb_port != WIZ_PORT else None
+    default_state = default_state or Path.home() / ".local/state/uniremote-wiz/state.json"
+    for name, value in (("--listen", args.listen), ("--broadcast", args.broadcast)):
+        try:
+            if not ipaddress.IPv4Address(value).is_loopback:
+                return f"{name} must be a loopback address with --test-loopback-bulbs"
+        except ValueError:
+            return f"{name} must be a loopback IPv4 address with --test-loopback-bulbs"
+    if Path(args.state).expanduser().resolve() == default_state.resolve():
+        return "--test-loopback-bulbs needs an isolated --state, never the household state file"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", default="127.0.0.1", help="Bind a specific LAN IP to allow the phone")
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--state", type=Path, default=Path.home() / ".local/state/uniremote-wiz/state.json")
     parser.add_argument("--broadcast", default="255.255.255.255", help="LAN broadcast for DHCP rediscovery")
+    parser.add_argument("--test-loopback-bulbs", action="store_true",
+                        help="TEST ONLY (tools/mock_lights.py): bulbs, discovery and HTTP all on 127/8; no Bonjour")
+    parser.add_argument("--test-bulb-port", type=int, default=WIZ_PORT, help="TEST ONLY: simulated bulb UDP port")
     args = parser.parse_args()
+    test_error = test_mode_error(args)
+    if test_error:
+        parser.error(test_error)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    butler = Butler(args.state, Udp(args.broadcast))
+    loopback = args.test_loopback_bulbs
+    butler = Butler(args.state, Udp(args.broadcast, args.test_bulb_port, loopback_only=loopback), loopback=loopback)
     server = ThreadingHTTPServer((args.listen, args.port), handler(butler))
     bonjour = Bonjour(args.listen, server.server_port)
-    bonjour.start()
+    if not loopback:
+        bonjour.start()
     stop = threading.Event()
 
     def poll():
