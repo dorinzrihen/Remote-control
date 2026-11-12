@@ -11,8 +11,8 @@ enum class TvRoute { LG, SAMSUNG, ATV, NONE }
 
 /**
  * Sends remote commands through the app-wide device clients in [App]. Shared by the remote screen
- * and by everything that works without it open: home-screen widgets, the lock-screen TV session
- * (notification + hardware volume keys) and the Quick Settings tile. No protocol logic lives here.
+ * and by the TV widget (home screen and lock screen), which works without the app open.
+ * No protocol logic lives here.
  */
 class TvControl(private val app: App) {
     private val lg get() = app.lg
@@ -90,16 +90,72 @@ class TvControl(private val app: App) {
         }
     }
 
-    /** A navigation / media key for "the TV" (no tab): used by widgets and the lock-screen controls. */
+    /** A navigation / media key for "the TV" (no tab): goes to the first connected device. */
     fun tvKey(key: Key): String? {
         if (key == Key.VOL_UP || key == Key.VOL_DOWN || key == Key.MUTE) return volume(key)
-        when (navRoute(lg.isConnected, samsung.isConnected, atv.isConnected)) {
-            TvRoute.LG -> lgKey(key)
-            TvRoute.SAMSUNG -> TvKeys.samsungKey(key)?.let { samsung.key(it) } ?: return "Not available on Samsung"
-            TvRoute.ATV -> TvKeys.atvKey(key)?.let { atv.key(it) } ?: return "Not available on Xiaomi"
+        return keyTo(navRoute(lg.isConnected, samsung.isConnected, atv.isConnected), key)
+    }
+
+    /** A navigation / media key for one device. Returns null when sent, else a message for the user. */
+    fun keyTo(route: TvRoute, key: Key): String? {
+        when (route) {
+            TvRoute.LG -> if (lg.isConnected) lgKey(key) else return "LG TV not connected"
+            TvRoute.SAMSUNG -> if (samsung.isConnected) TvKeys.samsungKey(key)?.let { samsung.key(it) } ?: return "Not available on Samsung"
+                else return "Samsung TV not connected"
+            TvRoute.ATV -> if (atv.isConnected) TvKeys.atvKey(key)?.let { atv.key(it) } ?: return "Not available on Xiaomi"
+                else return "Xiaomi not connected"
             TvRoute.NONE -> return "Not connected"
         }
         return null
+    }
+
+    fun isConnected(route: TvRoute): Boolean = when (route) {
+        TvRoute.LG -> lg.isConnected
+        TvRoute.SAMSUNG -> samsung.isConnected
+        TvRoute.ATV -> atv.isConnected
+        TvRoute.NONE -> false
+    }
+
+    /** Connects every configured device, then waits up to [timeoutMs] for [route] in particular. */
+    suspend fun awaitRoute(route: TvRoute, timeoutMs: Long): Boolean {
+        ensureConnected()
+        if (isConnected(route)) return true
+        val flow = when (route) {
+            TvRoute.LG -> lg.state
+            TvRoute.SAMSUNG -> samsung.state
+            TvRoute.ATV -> atv.state
+            TvRoute.NONE -> return false
+        }
+        return withTimeoutOrNull(timeoutMs) { flow.first { isConnected(route) } } != null
+    }
+
+    /**
+     * True when the LG TV answers a request within [timeoutMs]. A connection that sat in a frozen
+     * (cached) app process can look connected while the TV has already dropped it.
+     */
+    suspend fun lgAnswers(timeoutMs: Long): Boolean = lg.isConnected &&
+        withTimeoutOrNull(timeoutMs) { runCatching { lg.request("ssap://audio/getVolume") }.isSuccess } == true
+
+    /** Drops the LG connection and dials again (same TV, same pairing key). */
+    fun reconnectLg() {
+        if (app.prefs.lgIp.isNotEmpty()) lg.connect(app.prefs.lgIp, app.prefs.lgKey)
+    }
+
+    /**
+     * Dials [route] again right away unless it is connected or waiting for the user on the TV. A tap must
+     * not wait for a client's retry back-off, or for a dial that started while Android was blocking the
+     * network of the cached (background) app and is now stuck until its timeout.
+     */
+    fun redialIfDown(route: TvRoute) {
+        val p = app.prefs
+        when (route) {
+            TvRoute.LG -> if (lg.state.value.let { it !is LgState.Connected && it !is LgState.WaitingForPrompt }) reconnectLg()
+            TvRoute.SAMSUNG -> if (p.samsungIp.isNotEmpty() && samsung.state.value.let { it !is SamsungState.Connected && it !is SamsungState.WaitingForPrompt })
+                samsung.connect(p.samsungIp, p.samsungToken)
+            TvRoute.ATV -> if (p.atvIp.isNotEmpty() && p.atvPaired && atv.state.value.let { it !is AtvState.Connected && it !is AtvState.NeedsPairing })
+                atv.connect(p.atvIp)
+            TvRoute.NONE -> {}
+        }
     }
 
     /** LG power: off when connected, else Wake-on-LAN. Returns the message to show. */

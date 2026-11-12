@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV widget: volume (left column) and arrow keys (inverted T). Nothing else on purpose.
+     The label is read-only: no click handler, so a tap never asks to unlock the phone. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/background" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="8dp" android:background="@drawable/widget_bg">
+    <TextView android:id="@+id/w_label" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:paddingStart="8dp" android:paddingEnd="8dp" android:paddingTop="2dp" android:paddingBottom="4dp"
+        android:text="UniRemote TV" android:textColor="@color/widget_dim" android:textSize="13sp"
+        android:singleLine="true" android:ellipsize="end" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+        android:orientation="horizontal">
+        <ImageButton android:id="@+id/w_vol_up" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:layout_margin="3dp"
+            android:background="@drawable/widget_btn_accent" android:src="@drawable/ic_w_vol_up" android:tint="@color/widget_on_accent"
+            android:scaleType="center" android:contentDescription="TV volume up" />
+        <FrameLayout android:layout_width="10dp" android:layout_height="match_parent" />
+        <FrameLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:layout_margin="3dp" />
+        <ImageButton android:id="@+id/w_up" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:layout_margin="3dp"
+            android:background="@drawable/widget_btn" android:src="@drawable/ic_w_up" android:tint="@color/widget_fg"
+            android:scaleType="center" android:contentDescription="Up" />
+        <FrameLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:layout_margin="3dp" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+        android:orientation="horizontal">
+        <ImageButton android:id="@+id/w_vol_down" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:layout_margin="3dp"
+            android:background="@drawable/widget_btn_accent" android:src="@drawable/ic_w_vol_down" android:tint="@color/widget_on_accent"
+            android:scaleType="center" android:contentDescription="TV volume down" />
+        <FrameLayout android:layout_width="10dp" android:layout_height="match_parent" />
+        <ImageButton android:id="@+id/w_left" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:layout_margin="3dp"
+            android:background="@drawable/widget_btn" android:src="@drawable/ic_w_left" android:tint="@color/widget_fg"
+            android:scaleType="center" android:contentDescription="Left" />
+        <ImageButton android:id="@+id/w_down" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:layout_margin="3dp"
+            android:background="@drawable/widget_btn" android:src="@drawable/ic_w_down" android:tint="@color/widget_fg"
+            android:scaleType="center" android:contentDescription="Down" />
+        <ImageButton android:id="@+id/w_right" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:layout_margin="3dp"
+            android:background="@drawable/widget_btn" android:src="@drawable/ic_w_right" android:tint="@color/widget_fg"
+            android:scaleType="center" android:contentDescription="Right" />
+    </LinearLayout>
+</LinearLayout>

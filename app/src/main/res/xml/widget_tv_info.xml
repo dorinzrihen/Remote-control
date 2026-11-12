@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen and lock screen. Android 16 QPR2+ lists every widget that does not opt out with
+     "not_keyguard" in its lock-screen widget picker; "keyguard" is declared too, to be explicit. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="250dp" android:minHeight="110dp"
+    android:minResizeWidth="180dp" android:minResizeHeight="100dp"
+    android:targetCellWidth="4" android:targetCellHeight="2"
+    android:resizeMode="horizontal|vertical" android:updatePeriodMillis="0"
+    android:initialLayout="@layout/widget_tv" android:previewLayout="@layout/widget_tv"
+    android:description="@string/widget_tv_description"
+    android:widgetCategory="home_screen|keyguard" />
