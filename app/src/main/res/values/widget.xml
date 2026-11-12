@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TV widget: the app's own dark palette before Android 12, Material You after. -->
+    <color name="widget_bg">#F0181A21</color>
+    <color name="widget_btn">#FF232630</color>
+    <color name="widget_accent">#FF7AA2F7</color>
+    <color name="widget_on_accent">#FF0E0F13</color>
+    <color name="widget_fg">#FFE6E8EF</color>
+    <color name="widget_dim">#FF8A90A3</color>
+    <dimen name="widget_radius">24dp</dimen>
+    <dimen name="widget_btn_radius">16dp</dimen>
+    <string name="widget_tv_label">TV volume &amp; arrows</string>
+    <string name="widget_tv_description">TV volume and arrow keys. Works on the lock screen without unlocking.</string>
+</resources>

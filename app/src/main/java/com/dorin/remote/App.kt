@@ -13,6 +13,7 @@ class App : Application() {
     lateinit var atv: AtvClient
     lateinit var samsung: SamsungClient
     lateinit var lights: Lights
+    lateinit var tv: TvControl
 
     override fun onCreate() {
         super.onCreate()
@@ -23,6 +24,9 @@ class App : Application() {
         atv = AtvClient(this)
         samsung = SamsungClient(this) { token -> prefs.samsungToken = token }
         lights = Lights(prefs)
+        tv = TvControl(this)
+        // Re-push the TV widget's buttons: Android 15+ cancels an app's PendingIntents when it is force-stopped.
+        runCatching { com.dorin.remote.widget.TvWidget.updateAll(this) }
     }
 
     companion object {

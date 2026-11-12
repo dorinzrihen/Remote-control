@@ -30,6 +30,17 @@ the real lighting manager driving simulated bulbs on loopback, checks power,
 Regular/Night, offline and discovery, and saves screenshots to
 `/tmp/uniremote-mock-e2e/`. See [mock lights e2e](mock-e2e.md) for interactive commands.
 
+## Lock-screen TV widget (Android 16 emulator, mock TV)
+
+```sh
+just lockscreen-widget scenario --build
+just lockscreen-widget down
+```
+
+Adds the widget to the lock-screen hub of the disposable `uniremote-android16` emulator, locks it
+with a PIN and checks that Vol +/− and the arrows reach a simulated LG TV without unlocking. See
+[lock-screen widget](lockscreen-widget.md).
+
 ## Actual Pixel 8a on home Wi-Fi
 
 - [ ] Install Preview without replacing the working UniRemote app.
@@ -46,6 +57,10 @@ Regular/Night, offline and discovery, and saves screenshots to
   last tapped button. When following, only Follow is selected, even if the room
   status describes the current Night/Regular preset. Unknown/mixed state must
   not invent a selection. Read-only inspection cannot prove mode transitions.
+
+- [ ] Lock-screen widget: turn on Settings → Display & touch → Lock screen → Widgets on lock
+  screen, add **TV volume & arrows**, lock the phone, swipe left and tap Vol +/− and the arrows
+  on the real TV. Repeat after the phone has been idle with the screen off for a while.
 
 See [lighting validation](lighting-lan-testing.md) for fixtures versus real-LAN
 evidence. Physical-phone and schedule-behavior checks remain release gates;

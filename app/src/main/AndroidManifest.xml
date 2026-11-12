@@ -46,6 +46,14 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="TV sleep timer countdown" />
         </service>
+        <!-- TV widget (home screen + Android 16 lock screen): Volume +/- and arrows. Taps are broadcasts
+             to this receiver, so they run while the phone is locked without unlocking it. -->
+        <receiver android:name=".widget.TvWidgetProvider" android:exported="false" android:label="@string/widget_tv_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_tv_info" />
+        </receiver>
         <!-- Inert upgrade cleanup for alarms installed by old versions. -->
         <receiver android:name=".NightLightsReceiver" android:exported="false">
             <intent-filter>

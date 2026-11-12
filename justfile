@@ -12,3 +12,8 @@ emulator action="dev":
 # e.g. `just mock-lights up`, `just mock-lights scenario`, `just mock-lights state`, `just mock-lights down`
 mock-lights *args="scenario":
     @{{python}} tools/mock_e2e.py {{args}}
+
+# Lock-screen TV widget on a disposable Android 16 emulator against a simulated LG TV (loopback only).
+# e.g. `just lockscreen-widget scenario --build`, `just lockscreen-widget tv`, `just lockscreen-widget down`
+lockscreen-widget *args="scenario":
+    @{{python}} tools/lockscreen_widget_demo.py {{args}}
